@@ -2,116 +2,113 @@ const Ride = require('../models/Ride');
 const User = require('../models/User');
 
 const rideController = {
-    requestRide: async (req, res, io) => {
-        const { pickup, destination, fare } = req.body;
-        const passengerId = req.user.id;
-
+    requestRide: async (req, res) => {
         try {
-            // Find nearby online drivers within 5km with available seats
-            const nearbyDrivers = await User.find({
-                role: 'driver',
-                isOnline: true,
-                availableSeats: { $gt: 0 },
-                location: {
-                    $near: {
-                        $geometry: { type: 'Point', coordinates: [pickup.lng, pickup.lat] },
-                        $maxDistance: 5000 // 5km radius for MVP
-                    }
+            const io = req.app.get("io");
+            const { pickup, destination, fare } = req.body;
+            const passenger = req.user;
+
+            console.log("Incoming request:", req.body);
+            console.log("User:", passenger);
+
+            // ✅ CREATE RIDE
+            const ride = new Ride({
+                passengerId: passenger._id,
+                passenger: {
+                    name: passenger.name,
+                    phone: passenger.phone
+                },
+                pickup,
+                destination,
+                fare: fare || 0,
+                status: "pending"
+            });
+
+            await ride.save();
+
+            console.log("Ride created:", ride);
+
+            // ✅ FIND ONLINE DRIVERS
+            const drivers = await User.find({
+                role: "driver",
+                isOnline: true
+            });
+
+            console.log("Available drivers:", drivers.length);
+
+            // ✅ SEND TO EACH DRIVER (IMPORTANT)
+            drivers.forEach((driver) => {
+                if (driver._id) {
+                    console.log("Sending to driver:", driver._id.toString());
+                    io.to(driver._id.toString()).emit("newRideRequest", ride);
                 }
             });
 
-            // Filter drivers by direction (Destination similarity)
-            const getDistance = (c1, c2) => {
-                if (!c1 || !c2) return 999;
-                const dx = c1[0] - c2[0];
-                const dy = c1[1] - c2[1];
-                return Math.sqrt(dx * dx + dy * dy);
-            };
+            res.json({ success: true, ride });
 
-            const filteredDrivers = nearbyDrivers.filter(driver => {
-                if (!driver.destination || !driver.destination.coordinates) return false;
-                const dist = getDistance(driver.destination.coordinates, [destination.lng, destination.lat]);
-                return dist < 0.03; // Approx 3km tolerance
-            });
-
-            if (filteredDrivers.length === 0) {
-                return res.status(404).json({ message: 'No drivers heading in your direction found' });
-            }
-
-            const ride = new Ride({
-                passengerId,
-                pickup: { type: 'Point', coordinates: [pickup.lng, pickup.lat] },
-                destination: { type: 'Point', coordinates: [destination.lng, destination.lat] },
-                fare,
-                status: 'pending'
-            });
-
-            await ride.save();
-
-            // Emit to each filtered driver room
-            filteredDrivers.forEach(driver => {
-                io.to(driver._id.toString()).emit('newRideRequest', {
-                    rideId: ride._id,
-                    passenger: { id: passengerId, name: req.user.name },
-                    pickup,
-                    destination,
-                    fare
-                });
-            });
-
-            res.status(201).json({ message: 'Ride request sent', rideId: ride._id });
-        } catch (error) {
-            console.error('Ride request error:', error);
-            res.status(500).json({ message: 'Ride request failed', error: error.message });
+        } catch (err) {
+            console.error("REQUEST RIDE ERROR:", err);
+            res.status(500).json({ msg: "Server error" });
         }
     },
 
-    acceptRide: async (req, res, io) => {
-        const { rideId } = req.body;
-        const driverId = req.user.id;
-
+    acceptRide: async (req, res) => {
         try {
+            const io = req.app.get("io");
+            const { rideId } = req.body;
+            console.log("Incoming rideId:", rideId);
+
+            if (!rideId) {
+                return res.status(400).json({ msg: "Ride ID required" });
+            }
+
             const ride = await Ride.findById(rideId);
-            if (!ride || ride.status !== 'pending') {
-                return res.status(400).json({ message: 'Ride is no longer available' });
+
+            if (!ride) {
+                return res.status(404).json({ msg: "Ride not found" });
             }
 
-            const driver = await User.findById(driverId);
-            if (driver.availableSeats <= 0) {
-                return res.status(400).json({ message: 'No more seats available' });
+            if (ride.status !== "pending") {
+                return res.status(400).json({ msg: "Ride already handled" });
             }
 
-            ride.driverId = driverId;
-            ride.status = 'accepted';
-            await ride.save();
+            const driver = await User.findById(req.user.id);
+            if (!driver || driver.availableSeats <= 0) {
+                return res.status(400).json({ msg: "No more seats or driver not found" });
+            }
+
+            // ✅ Attach full driver info
+            ride.driver = {
+                id: driver._id,
+                name: driver.name,
+                phone: driver.phone
+            };
+            ride.driverId = driver._id;
+            ride.status = "accepted";
 
             // Decrement driver seats
             driver.availableSeats -= 1;
-            // Driver stays online but seats reduced
             await driver.save();
+            await ride.save();
 
-            // Notify passenger room
-            io.to(ride.passengerId.toString()).emit('rideAccepted', {
-                rideId: ride._id,
-                status: 'accepted',
-                driver: { 
-                    id: driverId, 
-                    name: req.user.name, 
-                    location: driver.location,
-                    destination: driver.destination 
-                },
-                pickup: ride.pickup,
-                destination: ride.destination,
-                fare: ride.fare
+            console.log("Ride accepted:", ride);
+
+            // Notify passenger
+            io.to(ride.passengerId.toString()).emit("rideAccepted", {
+                driver: ride.driver,
+                ride
             });
 
-            res.status(200).json({ message: 'Ride accepted', ride });
-        } catch (error) {
-            res.status(500).json({ message: 'Error accepting ride', error: error.message });
+            res.json({ success: true, ride });
+
+        } catch (err) {
+            console.error("❌ ACCEPT RIDE ERROR:", err);
+            res.status(500).json({ msg: "Server error" });
         }
     },
 
-    rejectRide: async (req, res, io) => {
+    rejectRide: async (req, res) => {
+        const io = req.app.get("io");
         const { rideId } = req.body;
         try {
             const ride = await Ride.findById(rideId);
@@ -129,7 +126,8 @@ const rideController = {
         }
     },
 
-    startRide: async (req, res, io) => {
+    startRide: async (req, res) => {
+        const io = req.app.get("io");
         const { rideId } = req.body;
         try {
             const ride = await Ride.findById(rideId);
@@ -147,7 +145,8 @@ const rideController = {
         }
     },
 
-    updateRideStatus: async (req, res, io) => {
+    updateRideStatus: async (req, res) => {
+        const io = req.app.get("io");
         const { rideId, status } = req.body;
         try {
             const ride = await Ride.findById(rideId);
@@ -177,27 +176,22 @@ const rideController = {
     },
 
     getNearbyDrivers: async (req, res) => {
-        const { lat, lng } = req.query;
         try {
-            let query = { role: 'driver', isOnline: true, availableSeats: { $gt: 0 } };
-            
-            if (lat && lng) {
-                query.location = {
-                    $near: {
-                        $geometry: { type: 'Point', coordinates: [parseFloat(lng), parseFloat(lat)] },
-                        $maxDistance: 5000 // 5km radius
-                    }
-                };
-            }
+            const drivers = await User.find({
+                role: "driver",
+                isOnline: true,
+                availableSeats: { $gt: 0 }
+            });
 
-            const drivers = await User.find(query).limit(10);
-            res.status(200).json(drivers);
+            res.json(drivers);
         } catch (error) {
-            res.status(500).json({ message: 'Error fetching nearby drivers', error: error.message });
+            console.error("NEARBY ERROR:", error);
+            res.status(500).json({ msg: "Error fetching drivers" });
         }
     },
     
-    completeRide: async (req, res, io) => {
+    completeRide: async (req, res) => {
+        const io = req.app.get("io");
         const { rideId } = req.body;
         const driverId = req.user.id;
         try {
@@ -221,25 +215,34 @@ const rideController = {
         }
     },
     
-    goOnline: async (req, res, io) => {
-        const { location, destination, availableSeats } = req.body;
-        const driverId = req.user.id;
-
+    goOnline: async (req, res) => {
         try {
-            await User.findByIdAndUpdate(driverId, {
+            const { location, destination, availableSeats } = req.body;
+
+            await User.findByIdAndUpdate(req.user.id, {
                 isOnline: true,
-                location: { type: 'Point', coordinates: [location.lng, location.lat] },
-                destination: destination ? { type: 'Point', coordinates: [destination.lng, destination.lat] } : undefined,
+                location: {
+                    type: "Point",
+                    coordinates: [location.lng, location.lat]
+                },
+                destination: destination
+                    ? {
+                        type: "Point",
+                        coordinates: [destination.lng, destination.lat]
+                      }
+                    : undefined,
                 availableSeats: availableSeats || 4
             });
 
-            res.status(200).json({ message: 'You are now online' });
+            res.json({ success: true });
+
         } catch (error) {
-            res.status(500).json({ message: 'Failed to go online', error: error.message });
+            console.error("ONLINE ERROR:", error);
+            res.status(500).json({ msg: "Failed to go online" });
         }
     },
 
-    goOffline: async (req, res, io) => {
+    goOffline: async (req, res) => {
         const driverId = req.user.id;
 
         try {

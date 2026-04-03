@@ -10,6 +10,7 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
     const destMarkerRef = useRef(null);
     const activeDriverMarkerRef = useRef(null);
     const [mapLoaded, setMapLoaded] = useState(false);
+    const currentLocMarkerRef = useRef(null);
 
     useEffect(() => {
         const token = import.meta.env.VITE_MAPBOX_TOKEN;
@@ -25,13 +26,12 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
             container: mapContainer.current,
             style: 'mapbox://styles/mapbox/streets-v11',
             center: userLocation || [77.5946, 12.9716], // Bangalore
-            zoom: 13,
+            zoom: 14,
             pitch: 45
         });
 
         mapRef.current.on('load', () => {
             setMapLoaded(true);
-            console.log('Map loaded successfully');
         });
 
         return () => {
@@ -63,12 +63,23 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
         };
     }, [onMapClick]);
 
-    // Center map on user location when it changes initially
+    // Handle Current Location Marker and flyTo
     useEffect(() => {
-        if (mapRef.current && userLocation && !pickup && !destination) {
-            mapRef.current.flyTo({ center: userLocation, zoom: 14 });
+        if (!mapLoaded || !mapRef.current || !userLocation) return;
+
+        mapRef.current.flyTo({ center: userLocation, zoom: 15 });
+
+        if (!currentLocMarkerRef.current) {
+            const el = document.createElement('div');
+            el.innerHTML = '<div style="background: #10b981; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);"></div>';
+            currentLocMarkerRef.current = new mapboxgl.Marker(el)
+                .setLngLat(userLocation)
+                .addTo(mapRef.current);
+        } else {
+            currentLocMarkerRef.current.setLngLat(userLocation);
         }
-    }, [userLocation]);
+    }, [userLocation, mapLoaded]);
+
 
     // Handle Pickup Marker (GREEN)
     useEffect(() => {
@@ -204,7 +215,7 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
                         type: 'line',
                         source: 'route',
                         layout: { 'line-join': 'round', 'line-cap': 'round' },
-                        paint: { 'line-color': '#22c55e', 'line-width': 5, 'line-opacity': 0.75 }
+                        paint: { 'line-color': '#10b981', 'line-width': 5, 'line-opacity': 0.8 }
                     });
                 }
             } catch (err) {

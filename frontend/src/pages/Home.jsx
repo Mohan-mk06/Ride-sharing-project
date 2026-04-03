@@ -6,7 +6,7 @@ import { LogIn, UserPlus, Mail, Lock, User as UserIcon, ArrowRight, ShieldCheck,
 const Home = ({ setUser }) => {
     const [isLogin, setIsLogin] = useState(true);
     const [formData, setFormData] = useState({
-        name: '', email: '', password: '', role: 'passenger'
+        name: '', email: '', password: '', role: 'passenger', phone: ''
     });
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
@@ -47,19 +47,34 @@ const Home = ({ setUser }) => {
 
                 <form onSubmit={handleSubmit} className="auth-form">
                     {!isLogin && (
-                        <div className="form-group">
-                            <label>Full Name</label>
-                            <div style={{ position: 'relative' }}>
-                                <UserIcon size={18} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
-                                <input 
-                                    type="text" 
-                                    placeholder="Enter your name" 
-                                    style={{ paddingLeft: '44px' }}
-                                    onChange={(e) => setFormData({ ...formData, name: e.target.value })} 
-                                    required 
-                                />
+                        <>
+                            <div className="form-group">
+                                <label>Full Name</label>
+                                <div style={{ position: 'relative' }}>
+                                    <UserIcon size={18} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                                    <input 
+                                        type="text" 
+                                        placeholder="Enter your name" 
+                                        style={{ paddingLeft: '44px' }}
+                                        onChange={(e) => setFormData({ ...formData, name: e.target.value })} 
+                                        required 
+                                    />
+                                </div>
                             </div>
-                        </div>
+                            <div className="form-group">
+                                <label>Phone Number</label>
+                                <div style={{ position: 'relative' }}>
+                                    <Zap size={18} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                                    <input 
+                                        type="text" 
+                                        placeholder="+91 98765 43210" 
+                                        style={{ paddingLeft: '44px' }}
+                                        onChange={(e) => setFormData({ ...formData, phone: e.target.value })} 
+                                        required 
+                                    />
+                                </div>
+                            </div>
+                        </>
                     )}
                     <div className="form-group">
                         <label>Email Address</label>

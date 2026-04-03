@@ -6,20 +6,11 @@ const socketManager = (io) => {
         console.log('User Connected:', socket.id);
         let currentUserId = null;
 
-        socket.on('join', async (userId) => {
+        socket.on('register', (userId) => {
             if (userId && mongoose.Types.ObjectId.isValid(userId)) {
                 currentUserId = userId;
                 socket.join(userId); // Join room named after userId
-                
-                try {
-                    await User.findByIdAndUpdate(userId, { 
-                        socketId: socket.id, 
-                        isOnline: true 
-                    });
-                    console.log(`User joined room: ${userId}`);
-                } catch (error) {
-                    console.error('Error on join update:', error.message);
-                }
+                console.log(`User joined room: ${userId}`);
             }
         });
 
