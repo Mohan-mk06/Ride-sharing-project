@@ -23,12 +23,32 @@ const Dashboard = ({ user, setUser }) => {
     const [seats, setSeats] = useState(4);
     const navigate = useNavigate();
 
-    // 1. Initial Setup & Socket Connection
+    // 1. Socket Registration
+    useEffect(() => {
+        const userId = user?._id || user?.id;
+        if (!userId) return;
+
+        const socket = getSocket();
+        
+        console.log("📡 Registering socket:", userId);
+        socket.emit("register", userId);
+        
+        const handleConnect = () => {
+            console.log("📡 Re-registering socket on reconnect:", userId);
+            socket.emit("register", userId);
+        };
+        
+        socket.on("connect", handleConnect);
+        
+        return () => {
+            socket.off("connect", handleConnect);
+        };
+    }, [user?._id, user?.id]);
+
+    // 2. Initial Setup & Subscriptions
     useEffect(() => {
         if (!user) return;
         const socket = getSocket();
-        socket.on('connect', () => socket.emit('register', user._id));
-        socket.emit('register', user._id); 
 
         const fetchInitialDrivers = async (coords) => {
             try {
@@ -42,7 +62,7 @@ const Dashboard = ({ user, setUser }) => {
 
         // Subscriptions
         const unsubRequest = subscribeToEvent('newRideRequest', (data) => {
-            console.log("🚀 New Ride:", data);
+            console.log("🔥 RECEIVED RIDE:", data);
             setActiveRide(data);
             setRideStatus('pending_request');
             setStatus('pending_request');
@@ -186,11 +206,12 @@ const Dashboard = ({ user, setUser }) => {
 
         console.log("Sending:", pickup, destination);
         try {
-            await API.post('/rides/request', {
+            const res = await API.post('/rides/request', {
                 pickup,
                 destination,
                 fare
             });
+            setActiveRide(res.data.ride);
         } catch (err) {
             alert(err.response?.data?.message || 'Request failed');
             setSearching(false);
@@ -341,32 +362,43 @@ const Dashboard = ({ user, setUser }) => {
                                 <div className="status-searching" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', padding: '24px', background: '#f8fafc', borderRadius: '16px' }}>
                                     <Loader className="animate-spin" size={32} color="#10b981" />
                                     <div style={{ fontWeight: 600 }}>Finding nearby drivers...</div>
-                                    <button onClick={() => { setSearching(false); setRideStatus('idle'); setStatus('idle'); }} style={{ fontSize: '13px', color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer' }}>Cancel</button>
+                                    {activeRide?.fare && (
+                                        <div style={{ fontSize: '18px', fontWeight: 800, color: '#1e293b' }}>Fare: ₹{activeRide.fare}</div>
+                                    )}
+                                    <button onClick={() => { setSearching(false); setRideStatus('idle'); setStatus('idle'); setActiveRide(null); }} style={{ fontSize: '13px', color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer' }}>Cancel</button>
                                 </div>
                             )}
 
-                            {rideStatus === 'accepted' && driverInfo && (
-                                <div className="ride-card fade-in" style={{ padding: '20px', background: '#ecfdf5', borderRadius: '16px', border: '1px solid #10b981' }}>
-                                    <h3 style={{ fontSize: '18px', fontWeight: 800, color: '#065f46', marginBottom: '16px' }}>Driver Details</h3>
-                                    <div style={{ padding: '12px', background: 'white', borderRadius: '12px', marginBottom: '12px' }}>
-                                        <p style={{ margin: '0 0 8px', fontWeight: 700 }}>Name: {driverInfo?.name}</p>
-                                        <p style={{ margin: '0 0 8px', color: '#10b981', fontWeight: 600 }}>Phone: {driverInfo?.phone}</p>
-                                        <p style={{ margin: '0', color: '#10b981', fontWeight: 800 }}>Fare: ₹{activeRide?.fare}</p>
-                                    </div>
-                                    <p style={{ fontSize: '13px', color: '#065f46' }}>Driver is heading to your pickup location.</p>
-                                </div>
-                            )}
-
-                            {rideStatus === 'ongoing' && activeRide && (
-                                <div className="ride-card fade-in" style={{ padding: '20px', background: '#eff6ff', borderRadius: '16px', border: '1px solid #3b82f6' }}>
+                            {(rideStatus === 'accepted' || rideStatus === 'ongoing') && activeRide && (
+                                <div className="ride-card fade-in" style={{ padding: '20px', background: rideStatus === 'accepted' ? '#ecfdf5' : '#eff6ff', borderRadius: '16px', border: rideStatus === 'accepted' ? '1px solid #10b981' : '1px solid #3b82f6', marginBottom: '24px' }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-                                        <div style={{ background: '#3b82f6', padding: '8px', borderRadius: '10px' }}>
-                                            <Navigation size={20} color="white" />
+                                        <div style={{ background: rideStatus === 'accepted' ? '#10b981' : '#3b82f6', padding: '8px', borderRadius: '10px' }}>
+                                            <User size={20} color="white" />
                                         </div>
-                                        <div style={{ fontWeight: 700, color: '#1d4ed8' }}>Ride in Progress</div>
+                                        <div>
+                                            <div style={{ fontWeight: 800, color: rideStatus === 'accepted' ? '#065f46' : '#1d4ed8', fontSize: '16px' }}>
+                                                {rideStatus === 'accepted' ? 'Driver Arriving' : 'Ride in Progress'}
+                                            </div>
+                                            <div style={{ fontSize: '12px', color: rideStatus === 'accepted' ? '#047857' : '#2563eb' }}>
+                                                {rideStatus === 'accepted' ? 'Meet at pickup location' : 'Heading to destination'}
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div style={{ fontSize: '14px', color: '#1d4ed8' }}>
-                                        You are currently on your way to the destination. Enjoy your ride with <strong>{driverInfo?.name || activeRide.driver?.name}</strong>!
+                                    
+                                    <div style={{ padding: '16px', background: 'white', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Driver Name</span>
+                                            <span style={{ fontWeight: 700, color: '#1e293b' }}>{driverInfo?.name || activeRide?.driver?.name}</span>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Contact</span>
+                                            <span style={{ fontWeight: 600, color: rideStatus === 'accepted' ? '#10b981' : '#3b82f6' }}>📞 {driverInfo?.phone || activeRide?.driver?.phone}</span>
+                                        </div>
+                                        <div style={{ height: '1px', background: '#f1f5f9', margin: '12px 0' }}></div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Total Fare</span>
+                                            <span style={{ fontWeight: 800, color: '#1e293b', fontSize: '18px' }}>₹{activeRide?.fare}</span>
+                                        </div>
                                     </div>
                                 </div>
                             )}
@@ -407,31 +439,53 @@ const Dashboard = ({ user, setUser }) => {
                                 {isOnline ? <><ToggleRight /> GO OFFLINE</> : <><ToggleLeft /> GO ONLINE</>}
                             </button>
 
-                            {isOnline && rideStatus === 'accepted' && activeRide && (
-                                <div style={{ padding: '20px', background: '#eff6ff', borderRadius: '16px', border: '1px solid #3b82f6' }}>
-                                    <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#1d4ed8', marginBottom: '16px' }}>Passenger Details</h3>
-                                    <div style={{ padding: '12px', background: 'white', borderRadius: '12px', marginBottom: '16px' }}>
-                                        <p style={{ margin: '0 0 8px', fontWeight: 700 }}>Name: {activeRide.passenger?.name}</p>
-                                        <p style={{ margin: '0', color: '#3b82f6', fontWeight: 600 }}>Phone: {activeRide.passenger?.phone}</p>
+                            {isOnline && (rideStatus === 'accepted' || rideStatus === 'ongoing') && activeRide && (
+                                <div className="ride-card fade-in" style={{ padding: '20px', background: rideStatus === 'accepted' ? '#eff6ff' : '#ecfdf5', borderRadius: '16px', border: rideStatus === 'accepted' ? '1px solid #3b82f6' : '1px solid #10b981', marginBottom: '24px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                                        <div style={{ background: rideStatus === 'accepted' ? '#3b82f6' : '#10b981', padding: '8px', borderRadius: '10px' }}>
+                                            <User size={20} color="white" />
+                                        </div>
+                                        <div>
+                                            <div style={{ fontWeight: 800, color: rideStatus === 'accepted' ? '#1d4ed8' : '#065f46', fontSize: '16px' }}>
+                                                {rideStatus === 'accepted' ? 'Passenger Waiting' : 'Trip in Progress'}
+                                            </div>
+                                            <div style={{ fontSize: '12px', color: rideStatus === 'accepted' ? '#2563eb' : '#047857' }}>
+                                                {rideStatus === 'accepted' ? 'Proceed to pickup' : 'Drive safely to destination'}
+                                            </div>
+                                        </div>
                                     </div>
-                                    <button 
-                                        onClick={handleStartTrip}
-                                        style={{ width: '100%', padding: '12px', borderRadius: '12px', background: '#3b82f6', color: 'white', fontWeight: 700, cursor: 'pointer', border: 'none' }}
-                                    >
-                                        START TRIP
-                                    </button>
-                                </div>
-                            )}
 
-                            {isOnline && rideStatus === 'ongoing' && activeRide && (
-                                <div style={{ padding: '20px', background: '#ecfdf5', borderRadius: '16px', border: '1px solid #10b981' }}>
-                                    <div style={{ fontWeight: 700, color: '#065f46', marginBottom: '12px' }}>Current Ride Active</div>
-                                    <button 
-                                        onClick={handleCompleteRide}
-                                        style={{ width: '100%', padding: '12px', borderRadius: '12px', background: '#10b981', color: 'white', fontWeight: 700, cursor: 'pointer', border: 'none' }}
-                                    >
-                                        COMPLETE RIDE
-                                    </button>
+                                    <div style={{ padding: '16px', background: 'white', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.02)', marginBottom: '16px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Passenger Name</span>
+                                            <span style={{ fontWeight: 700, color: '#1e293b' }}>{activeRide.passenger?.name}</span>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Contact</span>
+                                            <span style={{ fontWeight: 600, color: rideStatus === 'accepted' ? '#3b82f6' : '#10b981' }}>📞 {activeRide.passenger?.phone}</span>
+                                        </div>
+                                        <div style={{ height: '1px', background: '#f1f5f9', margin: '12px 0' }}></div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Expected Fare</span>
+                                            <span style={{ fontWeight: 800, color: '#1e293b', fontSize: '18px' }}>₹{activeRide?.fare}</span>
+                                        </div>
+                                    </div>
+
+                                    {rideStatus === 'accepted' ? (
+                                        <button 
+                                            onClick={handleStartTrip}
+                                            style={{ width: '100%', padding: '14px', borderRadius: '12px', background: '#3b82f6', color: 'white', fontWeight: 800, cursor: 'pointer', border: 'none', transition: 'all 0.2s' }}
+                                        >
+                                            START TRIP
+                                        </button>
+                                    ) : (
+                                        <button 
+                                            onClick={handleCompleteRide}
+                                            style={{ width: '100%', padding: '14px', borderRadius: '12px', background: '#10b981', color: 'white', fontWeight: 800, cursor: 'pointer', border: 'none', transition: 'all 0.2s' }}
+                                        >
+                                            COMPLETE RIDE
+                                        </button>
+                                    )}
                                 </div>
                             )}
 

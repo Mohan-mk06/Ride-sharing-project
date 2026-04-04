@@ -35,8 +35,15 @@ const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/gomoto';
 
 mongoose.connect(MONGO_URI)
-    .then(() => {
+    .then(async () => {
         console.log('MongoDB Connected');
+        // Reset ghost drivers to offline on startup
+        try {
+            const User = require('./models/User');
+            await User.updateMany({ role: "driver" }, { isOnline: false, socketId: null });
+        } catch(e) {
+            console.error('Failed to reset drivers online status:', e);
+        }
         server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
     })
     .catch(err => console.error('MongoDB Connection Error:', err.message));

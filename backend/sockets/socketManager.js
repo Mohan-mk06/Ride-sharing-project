@@ -3,14 +3,28 @@ const User = require('../models/User');
 
 const socketManager = (io) => {
     io.on('connection', (socket) => {
-        console.log('User Connected:', socket.id);
+        console.log('✅ Connected:', socket.id);
         let currentUserId = null;
 
-        socket.on('register', (userId) => {
+        socket.on('register', async (data) => {
+            const userId = typeof data === 'object' ? data.userId : data;
+            
             if (userId && mongoose.Types.ObjectId.isValid(userId)) {
                 currentUserId = userId;
-                socket.join(userId); // Join room named after userId
-                console.log(`User joined room: ${userId}`);
+                socket.join(userId); // Keep for backwards compatibility
+                
+                try {
+                    const user = await User.findByIdAndUpdate(userId, {
+                        socketId: socket.id,
+                        isOnline: true
+                    }, { returnDocument: "after" });
+                    
+                    if (user) {
+                        console.log(`🔥 Registered user: ${user.name} | Socket: ${socket.id} | Online: ${user.isOnline}`);
+                    }
+                } catch (error) {
+                    console.error('Error on register update:', error.message);
+                }
             }
         });
 

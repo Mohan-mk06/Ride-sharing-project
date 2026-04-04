@@ -36,10 +36,14 @@ const rideController = {
 
             console.log("Available drivers:", drivers.length);
 
-            // ✅ SEND TO EACH DRIVER (IMPORTANT)
+                // ✅ SEND TO EACH DRIVER (IMPORTANT)
             drivers.forEach((driver) => {
-                if (driver._id) {
-                    console.log("Sending to driver:", driver._id.toString());
+                if (driver.socketId) {
+                    console.log("🚀 Emitting to socket:", driver.socketId);
+                    io.to(driver.socketId).emit("newRideRequest", ride);
+                } else if (driver._id) {
+                    // Fallback to room if socketId is not set
+                    console.log("🚀 Emitting to room:", driver._id.toString());
                     io.to(driver._id.toString()).emit("newRideRequest", ride);
                 }
             });
