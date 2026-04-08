@@ -36,8 +36,12 @@ const Dashboard = ({ user, setUser }) => {
     const [rating, setRating] = useState(0);
     const [feedback, setFeedback] = useState("");
     const [completedRideFare, setCompletedRideFare] = useState(null);
+    const [routeCoordinates, setRouteCoordinates] = useState([]); // 🔥 For simulation
+    const [driverLocation, setDriverLocation] = useState(null); // 🔥 Moving marker
+    const [remainingPath, setRemainingPath] = useState([]); // 🔥 For disappearing line
 
     const acceptTimeoutRef = useRef(null); // 🔥 Timer fallback guard
+    const intervalRef = useRef(null); // 🔥 Prevent duplicates
     const navigate = useNavigate();
 
     // 0. Socket Connection Lifecycle
@@ -70,6 +74,8 @@ const Dashboard = ({ user, setUser }) => {
         setAccepting(false);
         setRideStatus('idle');
         setStatus('idle');
+        setDriverLocation(null); // 🔥 Reset live tracking
+        setRouteCoordinates([]); // 🔥 Clear old route
         // 🔥 CRITICAL: DO NOT clear driverDestination here
     };
 
@@ -293,7 +299,7 @@ const Dashboard = ({ user, setUser }) => {
         }
     }, [searching, driverInfo]);
 
-    // 2. Driver Location Tracking
+    // 2. Driver Location Tracking (Real GPS fallback)
     useEffect(() => {
         let watchId;
         if (user?.role === 'driver' && isOnline) {
@@ -308,6 +314,68 @@ const Dashboard = ({ user, setUser }) => {
         };
     }, [user?.role, isOnline]);
 
+    // 🔥 LIVE DRIVER TRACKING (SIMULATION) - DRIVER SIDE
+    useEffect(() => {
+        if (!activeRide || user?.role !== 'driver' || !routeCoordinates || routeCoordinates.length === 0) return;
+        
+        // Stop simulation if ride completed
+        if (activeRide.status === 'completed') {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            return;
+        }
+
+        let index = 0;
+        console.log("🚀 Starting route simulation for ride:", activeRide._id);
+
+        intervalRef.current = setInterval(() => {
+            if (index >= routeCoordinates.length) {
+                console.log("🏁 Route simulation finished");
+                clearInterval(intervalRef.current);
+                handleCompleteRide(); // 🔥 AUTO COMPLETE
+                return;
+            }
+
+            const coords = routeCoordinates[index];
+            const restOfPath = routeCoordinates.slice(index); // 🔥 Sliced path
+            
+            setDriverLocation(coords); // 🔥 DRIVER SIDE UPDATE
+            setRemainingPath(restOfPath); // 🔥 DRIVER SIDE UPDATE
+
+            const passengerId = activeRide.passengerId || activeRide.passenger?._id || activeRide.passenger?.id;
+
+            if (passengerId) {
+                emitEvent("driverLocationUpdate", {
+                    passengerId: passengerId,
+                    coords,
+                    remainingPath: restOfPath // 🔥 Emit to passenger
+                });
+            }
+
+            index++;
+        }, 2000);
+
+        return () => {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+        };
+    }, [activeRide?._id, activeRide?.status, routeCoordinates, user?.role]);
+
+    // 🔥 LIVE DRIVER TRACKING (SIMULATION) - PASSENGER SIDE
+    useEffect(() => {
+        const socket = getSocket();
+        
+        const handleLocationUpdate = ({ coords, remainingPath }) => {
+            console.log("📍 Received driver location update:", coords);
+            setDriverLocation(coords);
+            if (remainingPath) setRemainingPath(remainingPath); // 🔥 Update path
+        };
+
+        socket.on("driverLocationUpdate", handleLocationUpdate);
+        
+        return () => {
+            socket.off("driverLocationUpdate", handleLocationUpdate);
+        };
+    }, []);
+
 
 
 
@@ -319,7 +387,7 @@ const Dashboard = ({ user, setUser }) => {
         
         try {
             const token = import.meta.env.VITE_MAPBOX_TOKEN;
-            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${p1[0]},${p1[1]};${p2[0]},${p2[1]}?geometries=geojson&access_token=${token}`;
+            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${p1[0]},${p1[1]};${p2[0]},${p2[1]}?geometries=geojson&overview=full&access_token=${token}`;
             
             const res = await fetch(url);
             const data = await res.json();
@@ -330,6 +398,10 @@ const Dashboard = ({ user, setUser }) => {
                 
                 setDistance(distanceKm);
                 setDuration(durationMins);
+                
+                const route = data.routes[0].geometry.coordinates;
+                console.log("Full route points:", route.length);
+                setRouteCoordinates(route); // 🔥 Save for simulation
                 
                 // Set fare dynamically (₹7 per km), min ₹30
                 const calculatedFare = Math.max(30, Math.round(distanceKm * 7));
@@ -836,7 +908,7 @@ const Dashboard = ({ user, setUser }) => {
                             animation: 'fadeIn 0.3s ease-out, fadeOut 0.5s ease-in 9.5s'
                         }}>
                             {n.type === 'success' ? <CheckCircle size={18} /> : n.type === 'error' ? <XCircle size={18} /> : <Zap size={18} />}
-                            {n.message}
+                            {n.msg}
                         </div>
                     ))}
                 </div>
@@ -847,6 +919,8 @@ const Dashboard = ({ user, setUser }) => {
                     destination={user?.role === 'passenger' ? destination : (activeRide ? activeRide.destination : driverDestination)}
                     markers={nearbyDrivers}
                     activeDriverLocation={activeRide?.driver?.location?.coordinates || activeRide?.driver?.location}
+                    driverLocation={driverLocation}
+                    remainingPath={remainingPath}
                     onMapClick={handleMapClick}
                     driverView={user?.role === 'driver'}
                 />

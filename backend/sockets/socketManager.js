@@ -86,6 +86,15 @@ const socketManager = (io) => {
             }
         });
 
+        // 🔥 LIVE DRIVER TRACKING (SIMULATION)
+        socket.on("driverLocationUpdate", ({ passengerId, coords }) => {
+            console.log(`📡 [Simulation] Forwarding location to passenger ${passengerId}`);
+            if (passengerId) {
+                const room = passengerId.toString();
+                io.to(room).emit("driverLocationUpdate", { coords });
+            }
+        });
+
         socket.on("acceptRide", async ({ rideId, driverId }, callback) => {
             console.log(`🚖 [${new Date().toLocaleTimeString()}] Accept request: Ride ${rideId} by Driver ${driverId}`);
             try {
@@ -131,7 +140,7 @@ const socketManager = (io) => {
                         },
                         status: "accepted"
                     },
-                    { new: true }
+                    { returnDocument: 'after' } // 🔥 FIXED DEPRECATION
                 );
 
                 if (!updatedRide) {

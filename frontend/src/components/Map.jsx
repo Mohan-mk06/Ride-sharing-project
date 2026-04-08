@@ -2,13 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, activeDriverLocation, driverView }) => {
+const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, activeDriverLocation, driverLocation, remainingPath = [], driverView }) => {
     const mapContainer = useRef(null);
     const mapRef = useRef(null);
     const markersRef = useRef({}); // Store markers by driver ID
     const pickupMarkerRef = useRef(null);
     const destMarkerRef = useRef(null);
     const activeDriverMarkerRef = useRef(null);
+    const driverMarkerRef = useRef(null); // Ref for simulated driver marker
     const [mapLoaded, setMapLoaded] = useState(false);
     const currentLocMarkerRef = useRef(null);
 
@@ -150,37 +151,65 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
         });
     }, [markers, mapLoaded]);
 
-    // Handle Active Driver (Biker Icon with pulse)
+    // Handle Live Driver Tracking (Simulated)
     useEffect(() => {
-        if (!mapLoaded || !mapRef.current) return;
+        if (!mapLoaded || !mapRef.current || !driverLocation) return;
 
-        if (activeDriverLocation) {
-            if (!activeDriverMarkerRef.current) {
-                const el = document.createElement('div');
-                el.className = 'active-driver-container';
-                el.innerHTML = `
-                    <div class="bike-pulse" style="position: relative; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; background: rgba(34, 197, 94, 0.2); border-radius: 50%;">
-                        <div class="bike-icon" style="background: #10b981; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid white; z-index: 2; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                            <span style="font-size: 14px;">🏍️</span>
-                        </div>
-                        <div style="position: absolute; width: 100%; height: 100%; background: #10b981; border-radius: 50%; opacity: 0.4; animation: bike-pulse-anim 2s infinite;"></div>
-                    </div>
-                `;
-                activeDriverMarkerRef.current = new mapboxgl.Marker(el)
-                    .setLngLat(activeDriverLocation)
-                    .addTo(mapRef.current);
-            } else {
-                activeDriverMarkerRef.current.setLngLat(activeDriverLocation);
-            }
-        } else if (activeDriverMarkerRef.current) {
-            activeDriverMarkerRef.current.remove();
-            activeDriverMarkerRef.current = null;
+        console.log("📍 [Map] Updating driver marker:", driverLocation);
+        console.log("Driver location received:", driverLocation);
+
+        if (!driverMarkerRef.current) {
+            driverMarkerRef.current = new mapboxgl.Marker({ color: "#2563eb", scale: 1.2 })
+                .setLngLat(driverLocation)
+                .addTo(mapRef.current);
+        } else {
+            driverMarkerRef.current.setLngLat(driverLocation);
         }
-    }, [activeDriverLocation, mapLoaded]);
+    }, [driverLocation, mapLoaded]);
 
     // Draw Route Line
     useEffect(() => {
-        if (!mapLoaded || !mapRef.current || !pickup || !destination) {
+        if (!mapLoaded || !mapRef.current) return;
+
+        // 🔥 Case 1: Use remainingPath for simulation (disappearing line)
+        if (remainingPath && remainingPath.length > 0) {
+            if (mapRef.current.getSource('route')) {
+                mapRef.current.getSource('route').setData({
+                    type: 'Feature',
+                    geometry: {
+                        type: 'LineString',
+                        coordinates: remainingPath
+                    }
+                });
+            } else {
+                mapRef.current.addSource('route', {
+                    type: 'geojson',
+                    data: {
+                        type: 'Feature',
+                        geometry: {
+                            type: 'LineString',
+                            coordinates: remainingPath
+                        }
+                    }
+                });
+
+                mapRef.current.addLayer({
+                    id: 'route',
+                    type: 'line',
+                    source: 'route',
+                    layout: { 'line-join': 'round', 'line-cap': 'round' },
+                    paint: { 
+                        'line-color': driverView ? '#3b82f6' : '#10b981', 
+                        'line-width': 5, 
+                        'line-opacity': 0.8 
+                    }
+                });
+            }
+            return; // Exit early if we have a simulation path
+        }
+
+        // 🔥 Case 2: Use static pickup/destination for initial planning
+        if (!pickup || !destination) {
             if (mapRef.current?.getLayer('route')) mapRef.current.removeLayer('route');
             if (mapRef.current?.getSource('route')) mapRef.current.removeSource('route');
             return;
@@ -191,10 +220,10 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
                 let url;
                 if (driverView && userLocation) {
                     // Route: Driver -> Pickup -> Destination
-                    url = `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation[0]},${userLocation[1]};${pickup[0]},${pickup[1]};${destination[0]},${destination[1]}?geometries=geojson&access_token=${mapboxgl.accessToken}`;
+                    url = `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation[0]},${userLocation[1]};${pickup[0]},${pickup[1]};${destination[0]},${destination[1]}?geometries=geojson&overview=full&access_token=${mapboxgl.accessToken}`;
                 } else {
                     // Route: Pickup -> Destination
-                    url = `https://api.mapbox.com/directions/v5/mapbox/driving/${pickup[0]},${pickup[1]};${destination[0]},${destination[1]}?geometries=geojson&access_token=${mapboxgl.accessToken}`;
+                    url = `https://api.mapbox.com/directions/v5/mapbox/driving/${pickup[0]},${pickup[1]};${destination[0]},${destination[1]}?geometries=geojson&overview=full&access_token=${mapboxgl.accessToken}`;
                 }
 
                 const res = await fetch(url);
@@ -235,7 +264,7 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
         };
 
         drawRoute();
-    }, [pickup, destination, userLocation, mapLoaded, driverView]);
+    }, [pickup, destination, userLocation, mapLoaded, driverView, remainingPath]);
 
     return (
         <div style={{ width: '100%', height: '100%', position: 'relative' }}>

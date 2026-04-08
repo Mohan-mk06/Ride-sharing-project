@@ -82,3 +82,31 @@
 - Additive State Updates: `setActiveRide` now preserves driver profile data during partial status updates.
 
 [Status] - Dashboard Fully Optimized. Sync Robust. Driver Info Persistent.
+
+[LIVE DRIVER TRACKING (SIMULATION)]
+- Implemented simulated driver movement using route coordinates.
+- Added driverLocationUpdate socket event for real-time tracking.
+- Passenger now sees moving driver marker (Car icon) every 2 seconds.
+- Integrated safety checks: Interval cleanup, ride status validation, and passenger room targeting.
+- No GPS used, no DB updates during tracking to minimize backend load.
+
+[FIX: DRIVER MARKER NOT MOVING]
+- Fixed marker update using useRef for persistence.
+- Added console logging for coordinate verification.
+- Ensured marker updates instantly upon driverLocation state change.
+- Verified [longitude, latitude] coordinate orientation.
+
+[FIX: ROUTE COORDINATES EXTRACTION]
+- Corrected Mapbox route geometry extraction using full coordinate array.
+- Added overview=full parameter to Mapbox API for detailed path geometry.
+- Verified route length via console logs (Enabled smooth simulation movement).
+
+[ENHANCED LIVE TRACKING & AUTO-COMPLETE]
+- Implemented dual-view simulation (Both Driver & Passenger see movement).
+- Added "Disappearing Path" effect: Route line shortens as the marker progresses.
+- Automated Ride Completion: System triggers handleCompleteRide once simulation reaches destination.
+- Passenger Review Modal opens automatically upon simulated arrival.
+
+[STABILITY HOTFIX: MAP REFERENCEERROR]
+- Fixed ReferenceError: remainingPath was not defined in Map.jsx.
+- Properly added remainingPath to component prop destructuring.
