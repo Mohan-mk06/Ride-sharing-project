@@ -1,30 +1,71 @@
 const mongoose = require('mongoose');
 const User = require('../models/User');
+const Ride = require('../models/Ride');
 
 const socketManager = (io) => {
     io.on('connection', (socket) => {
         console.log('✅ Connected:', socket.id);
         let currentUserId = null;
 
+        // Helper to emit to a user's consistent room
+        const emitToUser = (userId, event, data) => {
+            if (userId) {
+                const room = userId.toString();
+                console.log(`📡 [${new Date().toLocaleTimeString()}] Emitting ${event} to room: ${room}`);
+                io.to(room).emit(event, data);
+            }
+        };
+
         socket.on('register', async (data) => {
             const userId = typeof data === 'object' ? data.userId : data;
-            
+            const availableSeats = typeof data === 'object' ? data.availableSeats : null;
+
             if (userId && mongoose.Types.ObjectId.isValid(userId)) {
-                currentUserId = userId;
-                socket.join(userId); // Keep for backwards compatibility
+                // Prevent multiple room joins for the same user on this socket
+                if (currentUserId !== userId.toString()) {
+                    currentUserId = userId.toString();
+                    socket.join(currentUserId);
+                    console.log(`👤 User ${currentUserId} joined room`);
+                }
                 
                 try {
-                    const user = await User.findByIdAndUpdate(userId, {
+                    const updateData = {
                         socketId: socket.id,
                         isOnline: true
-                    }, { returnDocument: "after" });
+                    };
+                    
+                    if (availableSeats !== null) {
+                        updateData.availableSeats = availableSeats;
+                    }
+
+                    const user = await User.findByIdAndUpdate(userId, updateData, { new: true });
                     
                     if (user) {
-                        console.log(`🔥 Registered user: ${user.name} | Socket: ${socket.id} | Online: ${user.isOnline}`);
+                        console.log(`🔥 Registered: ${user.name} | Online: ${user.isOnline} | Seats: ${user.availableSeats}`);
                     }
                 } catch (error) {
                     console.error('Error on register update:', error.message);
                 }
+            }
+        });
+
+        socket.on('recover-state', async (callback) => {
+            if (!currentUserId) return callback({ status: 'error', message: 'Not registered' });
+            
+            try {
+                // Find any active ride for this user (as passenger or driver)
+                const activeRide = await Ride.findOne({
+                    $or: [{ passengerId: currentUserId }, { driverId: currentUserId }],
+                    status: { $in: ['pending', 'accepted', 'ongoing'] }
+                }).populate('driverId passengerId');
+
+                if (activeRide) {
+                    callback({ status: 'success', ride: activeRide });
+                } else {
+                    callback({ status: 'success', ride: null });
+                }
+            } catch (err) {
+                callback({ status: 'error', message: err.message });
             }
         });
 
@@ -35,7 +76,6 @@ const socketManager = (io) => {
                         location: { type: 'Point', coordinates: [lng, lat] }
                     });
                     
-                    // Broadcast to everyone for "nearby drivers" visualization
                     socket.broadcast.emit('driverLocationUpdated', {
                         driverId: currentUserId,
                         location: { lat, lng }
@@ -43,6 +83,146 @@ const socketManager = (io) => {
                 } catch (error) {
                     console.error('Error updating location:', error.message);
                 }
+            }
+        });
+
+        socket.on("accept-ride", async ({ rideId, driverId }, callback) => {
+            console.log(`🚖 [${new Date().toLocaleTimeString()}] Accept request: Ride ${rideId} by Driver ${driverId}`);
+            try {
+                // 1. Validation & Idempotency
+                const ride = await Ride.findById(rideId);
+                if (!ride) {
+                    if (callback) callback({ status: 'error', message: 'Ride not found' });
+                    return socket.emit("ride-error", "Ride not found");
+                }
+                
+                // Prevent duplicate acceptance
+                if (ride.status !== "pending") {
+                    console.log(`⚠️ Ride ${rideId} already processed (Status: ${ride.status})`);
+                    if (callback) callback({ status: 'error', message: 'Ride already taken or processed' });
+                    return socket.emit("ride-error", "Ride already taken or processed");
+                }
+                
+                // Re-fetch driver to get the latest availableSeats from DB
+                const driver = await User.findById(driverId);
+                if (!driver) {
+                    if (callback) callback({ status: 'error', message: 'Driver not found' });
+                    return socket.emit("ride-error", "Driver not found");
+                }
+                
+                const availableSeats = driver.availableSeats;
+                if (availableSeats < ride.passengers) {
+                    console.log(`⚠️ Driver ${driver.name} has insufficient seats: ${availableSeats} < ${ride.passengers}`);
+                    if (callback) callback({ status: 'error', message: 'Not enough seats' });
+                    return socket.emit("ride-error", "Not enough seats available");
+                }
+                
+                // 2. Atomic Updates
+                // Re-check status inside the update block if possible (using findOneAndUpdate with status filter)
+                const updatedRide = await Ride.findOneAndUpdate(
+                    { _id: rideId, status: "pending" },
+                    { 
+                        driverId: driverId,
+                        driver: {
+                            id: driver._id,
+                            name: driver.name,
+                            phone: driver.phone,
+                            location: driver.location
+                        },
+                        status: "accepted"
+                    },
+                    { new: true }
+                );
+
+                if (!updatedRide) {
+                    console.log(`⚠️ Ride ${rideId} was accepted by another driver concurrently`);
+                    if (callback) callback({ status: 'error', message: 'Ride already taken' });
+                    return socket.emit("ride-error", "Ride already taken");
+                }
+                
+                // Update driver capacity
+                driver.currentPassengers += ride.passengers;
+                driver.availableSeats -= ride.passengers; 
+                await driver.save();
+                
+                // 3. Notifications (Room-based)
+                const payload = {
+                    ride: updatedRide,
+                    driver: {
+                        _id: driver._id,
+                        id: driver._id, // Keep both for safety
+                        name: driver.name,
+                        phone: driver.phone,
+                        location: driver.location
+                    }
+                };
+
+                emitToUser(ride.passengerId, "ride-accepted", payload);
+                
+                // ACK back to driver
+                if (callback) callback({ status: 'success', ride: updatedRide });
+
+                console.log(`✅ [${new Date().toLocaleTimeString()}] Ride ${rideId} accepted by ${driver.name}`);
+            } catch (err) {
+                console.error("accept-ride error:", err);
+                if (callback) callback({ status: 'error', message: 'Server error' });
+                socket.emit("ride-error", "Failed to accept ride");
+            }
+        });
+
+        socket.on("reject-ride", async ({ rideId }, callback) => {
+            console.log(`❌ [${new Date().toLocaleTimeString()}] Reject request: Ride ${rideId}`);
+            try {
+                const ride = await Ride.findById(rideId);
+                if (!ride) {
+                    if (callback) callback({ status: 'error', message: 'Ride not found' });
+                    return;
+                }
+
+                if (ride.status === 'pending') {
+                    ride.status = 'rejected';
+                    await ride.save();
+                }
+
+                emitToUser(ride.passengerId, "rideRejected", { rideId: ride._id });
+
+                if (callback) callback({ status: 'success' });
+                console.log(`✅ [${new Date().toLocaleTimeString()}] Ride ${rideId} rejected`);
+            } catch (err) {
+                console.error("reject-ride error:", err);
+                if (callback) callback({ status: 'error', message: 'Server error' });
+            }
+        });
+
+        socket.on("complete-ride", async ({ rideId }, callback) => {
+            console.log(`🏁 Completion request: Ride ${rideId}`);
+            try {
+                const ride = await Ride.findById(rideId);
+                if (!ride) return;
+                
+                if (ride.status === 'completed') {
+                    if (callback) callback({ status: 'success', message: 'Already completed' });
+                    return;
+                }
+
+                const driver = await User.findById(ride.driverId);
+                if (driver) {
+                    driver.currentPassengers -= ride.passengers;
+                    driver.availableSeats += ride.passengers;
+                    if (driver.currentPassengers < 0) driver.currentPassengers = 0;
+                    await driver.save();
+                }
+                
+                ride.status = "completed";
+                await ride.save();
+
+                emitToUser(ride.passengerId, "rideCompleted", { rideId: ride._id, ride });
+                
+                if (callback) callback({ status: 'success' });
+                console.log(`✅ Ride ${rideId} completed`);
+            } catch (err) {
+                console.error("complete-ride error:", err);
+                if (callback) callback({ status: 'error', message: 'Server error' });
             }
         });
 

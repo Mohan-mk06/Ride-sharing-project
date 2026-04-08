@@ -15,6 +15,7 @@ const rideSchema = new mongoose.Schema({
     pickup: { type: [Number], required: true },
     destination: { type: [Number], required: true },
     fare: { type: Number, default: 0 },
+    passengers: { type: Number, required: true, default: 1 },
     status: {
         type: String,
         enum: ['pending', 'accepted', 'ongoing', 'completed', 'rejected', 'cancelled'],

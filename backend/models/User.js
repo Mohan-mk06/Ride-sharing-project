@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     isOnline: { type: Boolean, default: false },
     availableSeats: { type: Number, default: 0 },
+    currentPassengers: { type: Number, default: 0 },
     socketId: { type: String, default: null },
     location: {
         type: { type: String, default: 'Point' },

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, activeDriverLocation }) => {
+const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, activeDriverLocation, driverView }) => {
     const mapContainer = useRef(null);
     const mapRef = useRef(null);
     const markersRef = useRef({}); // Store markers by driver ID
@@ -188,9 +188,16 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
 
         const drawRoute = async () => {
             try {
-                const res = await fetch(
-                    `https://api.mapbox.com/directions/v5/mapbox/driving/${pickup[0]},${pickup[1]};${destination[0]},${destination[1]}?geometries=geojson&access_token=${mapboxgl.accessToken}`
-                );
+                let url;
+                if (driverView && userLocation) {
+                    // Route: Driver -> Pickup -> Destination
+                    url = `https://api.mapbox.com/directions/v5/mapbox/driving/${userLocation[0]},${userLocation[1]};${pickup[0]},${pickup[1]};${destination[0]},${destination[1]}?geometries=geojson&access_token=${mapboxgl.accessToken}`;
+                } else {
+                    // Route: Pickup -> Destination
+                    url = `https://api.mapbox.com/directions/v5/mapbox/driving/${pickup[0]},${pickup[1]};${destination[0]},${destination[1]}?geometries=geojson&access_token=${mapboxgl.accessToken}`;
+                }
+
+                const res = await fetch(url);
                 const data = await res.json();
                 if (!data.routes || !data.routes[0]) return;
 
@@ -215,7 +222,11 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
                         type: 'line',
                         source: 'route',
                         layout: { 'line-join': 'round', 'line-cap': 'round' },
-                        paint: { 'line-color': '#10b981', 'line-width': 5, 'line-opacity': 0.8 }
+                        paint: { 
+                            'line-color': driverView ? '#3b82f6' : '#10b981', 
+                            'line-width': 5, 
+                            'line-opacity': 0.8 
+                        }
                     });
                 }
             } catch (err) {
@@ -224,7 +235,7 @@ const Map = ({ onMapClick, markers = [], pickup, destination, userLocation, acti
         };
 
         drawRoute();
-    }, [pickup, destination, mapLoaded]);
+    }, [pickup, destination, userLocation, mapLoaded, driverView]);
 
     return (
         <div style={{ width: '100%', height: '100%', position: 'relative' }}>

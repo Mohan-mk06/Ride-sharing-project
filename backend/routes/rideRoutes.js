@@ -4,10 +4,8 @@ const rideController = require('../controllers/rideController');
 const authMiddleware = require('../middleware/authMiddleware');
 
 router.post('/request', authMiddleware, rideController.requestRide);
-router.post('/accept', authMiddleware, rideController.acceptRide);
 router.post('/start', authMiddleware, rideController.startRide);
 router.post('/reject', authMiddleware, rideController.rejectRide);
-router.post('/complete', authMiddleware, rideController.completeRide);
 router.get('/drivers', authMiddleware, rideController.getNearbyDrivers);
 router.get('/nearby', authMiddleware, rideController.getNearbyDrivers);
 

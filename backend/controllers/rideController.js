@@ -5,13 +5,14 @@ const rideController = {
     requestRide: async (req, res) => {
         try {
             const io = req.app.get("io");
-            const { pickup, destination, fare } = req.body;
+            const { pickup, destination, fare, passengers } = req.body;
             const passenger = req.user;
 
             console.log("Incoming request:", req.body);
             console.log("User:", passenger);
 
             // ✅ CREATE RIDE
+            const requestedPassengers = passengers || 1;
             const ride = new Ride({
                 passengerId: passenger._id,
                 passenger: {
@@ -21,6 +22,7 @@ const rideController = {
                 pickup,
                 destination,
                 fare: fare || 0,
+                passengers: requestedPassengers,
                 status: "pending"
             });
 
@@ -31,7 +33,8 @@ const rideController = {
             // ✅ FIND ONLINE DRIVERS
             const drivers = await User.find({
                 role: "driver",
-                isOnline: true
+                isOnline: true,
+                availableSeats: { $gte: requestedPassengers }
             });
 
             console.log("Available drivers:", drivers.length);
@@ -39,12 +42,12 @@ const rideController = {
                 // ✅ SEND TO EACH DRIVER (IMPORTANT)
             drivers.forEach((driver) => {
                 if (driver.socketId) {
-                    console.log("🚀 Emitting to socket:", driver.socketId);
-                    io.to(driver.socketId).emit("newRideRequest", ride);
+                    console.log(`🚀 Emitting to driver ${driver.name} | Socket: ${driver.socketId}`);
+                    io.to(driver.socketId).emit("new-ride", ride);
                 } else if (driver._id) {
                     // Fallback to room if socketId is not set
                     console.log("🚀 Emitting to room:", driver._id.toString());
-                    io.to(driver._id.toString()).emit("newRideRequest", ride);
+                    io.to(driver._id.toString()).emit("new-ride", ride);
                 }
             });
 
@@ -56,60 +59,6 @@ const rideController = {
         }
     },
 
-    acceptRide: async (req, res) => {
-        try {
-            const io = req.app.get("io");
-            const { rideId } = req.body;
-            console.log("Incoming rideId:", rideId);
-
-            if (!rideId) {
-                return res.status(400).json({ msg: "Ride ID required" });
-            }
-
-            const ride = await Ride.findById(rideId);
-
-            if (!ride) {
-                return res.status(404).json({ msg: "Ride not found" });
-            }
-
-            if (ride.status !== "pending") {
-                return res.status(400).json({ msg: "Ride already handled" });
-            }
-
-            const driver = await User.findById(req.user.id);
-            if (!driver || driver.availableSeats <= 0) {
-                return res.status(400).json({ msg: "No more seats or driver not found" });
-            }
-
-            // ✅ Attach full driver info
-            ride.driver = {
-                id: driver._id,
-                name: driver.name,
-                phone: driver.phone
-            };
-            ride.driverId = driver._id;
-            ride.status = "accepted";
-
-            // Decrement driver seats
-            driver.availableSeats -= 1;
-            await driver.save();
-            await ride.save();
-
-            console.log("Ride accepted:", ride);
-
-            // Notify passenger
-            io.to(ride.passengerId.toString()).emit("rideAccepted", {
-                driver: ride.driver,
-                ride
-            });
-
-            res.json({ success: true, ride });
-
-        } catch (err) {
-            console.error("❌ ACCEPT RIDE ERROR:", err);
-            res.status(500).json({ msg: "Server error" });
-        }
-    },
 
     rejectRide: async (req, res) => {
         const io = req.app.get("io");
@@ -162,7 +111,9 @@ const rideController = {
             if (status === 'completed') {
                 const driver = await User.findById(ride.driverId);
                 if (driver) {
-                    driver.availableSeats += 1;
+                    driver.currentPassengers -= ride.passengers;
+                    driver.availableSeats += ride.passengers;
+                    if (driver.currentPassengers < 0) driver.currentPassengers = 0;
                     await driver.save();
                 }
                 io.to(ride.passengerId.toString()).emit('rideCompleted', { 
@@ -194,30 +145,6 @@ const rideController = {
         }
     },
     
-    completeRide: async (req, res) => {
-        const io = req.app.get("io");
-        const { rideId } = req.body;
-        const driverId = req.user.id;
-        try {
-            const ride = await Ride.findById(rideId);
-            if (!ride) return res.status(404).json({ message: 'Ride not found' });
-            
-            ride.status = 'completed';
-            await ride.save();
-
-            // Reset driver
-            const driver = await User.findById(driverId);
-            driver.availableSeats += 1;
-            // Trip complete, but driver stays online
-            await driver.save();
-
-            io.to(ride.passengerId.toString()).emit('rideCompleted', { rideId: ride._id });
-
-            res.status(200).json({ message: 'Ride completed successfully', ride });
-        } catch (error) {
-            res.status(500).json({ message: 'Error completing ride', error: error.message });
-        }
-    },
     
     goOnline: async (req, res) => {
         try {
@@ -236,7 +163,7 @@ const rideController = {
                       }
                     : undefined,
                 availableSeats: availableSeats || 4
-            });
+            }, { returnDocument: "after" });
 
             res.json({ success: true });
 

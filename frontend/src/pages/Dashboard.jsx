@@ -13,6 +13,7 @@ const Dashboard = ({ user, setUser }) => {
     const [pickup, setPickup] = useState(null);
     const [destination, setDestination] = useState(null);
     const [driverDestination, setDriverDestination] = useState(null);
+    const [passengers, setPassengers] = useState(1);
     
     // Mandated States
     const [searching, setSearching] = useState(false);
@@ -21,6 +22,7 @@ const Dashboard = ({ user, setUser }) => {
     
     const [status, setStatus] = useState('idle'); // Backwards compatibility if needed
     const [seats, setSeats] = useState(4);
+    const [loading, setLoading] = useState(false);
     const navigate = useNavigate();
 
     // 1. Socket Registration
@@ -30,12 +32,16 @@ const Dashboard = ({ user, setUser }) => {
 
         const socket = getSocket();
         
-        console.log("📡 Registering socket:", userId);
-        socket.emit("register", userId);
+        const registrationData = user.role === 'driver' 
+            ? { userId, availableSeats: seats } 
+            : userId;
+
+        console.log("📡 Registering socket:", registrationData);
+        socket.emit("register", registrationData);
         
         const handleConnect = () => {
-            console.log("📡 Re-registering socket on reconnect:", userId);
-            socket.emit("register", userId);
+            console.log("📡 Re-registering socket on reconnect:", registrationData);
+            socket.emit("register", registrationData);
         };
         
         socket.on("connect", handleConnect);
@@ -43,7 +49,7 @@ const Dashboard = ({ user, setUser }) => {
         return () => {
             socket.off("connect", handleConnect);
         };
-    }, [user?._id, user?.id]);
+    }, [user?._id, user?.id, user?.role, seats]); 
 
     // 2. Initial Setup & Subscriptions
     useEffect(() => {
@@ -61,39 +67,35 @@ const Dashboard = ({ user, setUser }) => {
         };
 
         // Subscriptions
-        const unsubRequest = subscribeToEvent('newRideRequest', (data) => {
-            console.log("🔥 RECEIVED RIDE:", data);
+        const unsubRequest = subscribeToEvent('new-ride', (data) => {
+            console.log("🔥 [Socket] RECEIVED RIDE:", data);
             setActiveRide(data);
             setRideStatus('pending_request');
             setStatus('pending_request');
         });
-
-        const unsubAccepted = subscribeToEvent('rideAccepted', (data) => {
-            console.log("✅ Ride accepted:", data);
-            setSearching(false); // ✅ STOP SEARCH LOOP
-            setRideStatus('accepted');
-            setStatus('accepted'); 
-            setDriverInfo(data.driver);
-            setActiveRide(data.ride);
-        });
+        
 
         const unsubRejected = subscribeToEvent('rideRejected', () => {
+            console.log("❌ [Socket] Ride rejected");
             alert('Your ride request was rejected. Please try again.');
             setActiveRide(null);
             setSearching(false);
+            setLoading(false);
             setRideStatus('idle');
             setStatus('idle');
         });
 
         const unsubCompleted = subscribeToEvent('rideCompleted', (data) => {
-            setActiveRide(data.ride || activeRide);
+            console.log("✅ [Socket] Ride completed:", data);
+            setLoading(false);
+            setActiveRide(prev => ({ ...prev, ...(data.ride || {}), status: 'completed' }));
             setRideStatus('completed_summary');
             setStatus('completed_summary');
-            setPickup(null);
-            setDestination(null);
+            setSearching(false);
         });
 
         const unsubStatus = subscribeToEvent('rideStatusUpdated', (data) => {
+            console.log("📡 [Socket] Ride status updated:", data.status);
             setRideStatus(data.status);
             setStatus(data.status);
             setActiveRide(prev => ({ ...prev, status: data.status }));
@@ -111,12 +113,21 @@ const Dashboard = ({ user, setUser }) => {
                 return [...prev, { _id: data.driverId, location: { type: 'Point', coordinates: [data.location.lng, data.location.lat] } }];
             });
             
-            if (activeRide?.driver?.id === data.driverId) {
+            if (activeRide?.driver?.id === data.driverId || activeRide?.driver?._id === data.driverId) {
                 setActiveRide(prev => ({
                     ...prev,
-                    driver: { ...prev.driver, location: { ...prev.driver.location, coordinates: [data.location.lng, data.location.lat] } }
+                    driver: { 
+                        ...prev.driver, 
+                        location: { type: 'Point', coordinates: [data.location.lng, data.location.lat] } 
+                    }
                 }));
             }
+        });
+
+        const unsubError = subscribeToEvent('ride-error', (msg) => {
+            console.error("⚠️ [Socket Error]:", msg);
+            alert(msg);
+            setLoading(false);
         });
 
         // Get location and then fetch drivers
@@ -128,13 +139,51 @@ const Dashboard = ({ user, setUser }) => {
 
         return () => {
             unsubRequest();
-            unsubAccepted();
             unsubRejected();
             unsubCompleted();
             unsubStatus();
             unsubLocUpdate();
+            unsubError();
         };
-    }, [user, activeRide?.driver?.id]);
+    }, [user, activeRide?.driver?.id, activeRide?.driver?._id]);
+
+    // 2.3 Ride Accepted Listener (Dedicated)
+    useEffect(() => {
+        const socket = getSocket();
+        const handleRideAccepted = (data) => {
+            console.log("✅ ride-accepted RECEIVED:", data);
+            setSearching(false);
+            setLoading(false);
+            setRideStatus('accepted');
+            setStatus('accepted');
+            setDriverInfo(data.driver);
+            setActiveRide(data.ride);
+        };
+
+        socket.on("ride-accepted", handleRideAccepted);
+        return () => {
+            socket.off("ride-accepted", handleRideAccepted);
+        };
+    }, []); 
+
+    // 2.5 Reliability Fallback
+    useEffect(() => {
+        if (searching && !driverInfo) {
+            const timeout = setTimeout(() => {
+                const socket = getSocket();
+                socket.emit("recover-state", (res) => {
+                    if (res.status === 'success' && res.ride?.driver) {
+                        console.log("🔄 [Fallback] Recovered driver info");
+                        setDriverInfo(res.ride.driver);
+                        setActiveRide(res.ride);
+                        setRideStatus('accepted');
+                        setSearching(false);
+                    }
+                });
+            }, 2500);
+            return () => clearTimeout(timeout);
+        }
+    }, [searching, driverInfo]);
 
     // 2. Driver Location Tracking
     useEffect(() => {
@@ -151,32 +200,20 @@ const Dashboard = ({ user, setUser }) => {
         };
     }, [user?.role, isOnline]);
 
-    // Handlers
-    const handleCompleteRide = async () => {
-        try {
-            await API.post('/rides/complete', { rideId: activeRide?.rideId || activeRide?._id });
-            setRideStatus('idle');
-            setStatus('idle');
-            setPickup(null);
-            setDestination(null);
-            setActiveRide(null);
-            alert('Ride marked as completed!');
-        } catch (err) {
-            alert('Failed to complete ride');
-        }
-    };
 
     const calculateFare = (p1, p2) => {
         if (!p1 || !p2) return 0;
-        const R = 6371; 
+        const R = 6371;
         const dLat = (p2[1] - p1[1]) * Math.PI / 180;
         const dLng = (p2[0] - p1[0]) * Math.PI / 180;
         const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
                   Math.cos(p1[1] * Math.PI / 180) * Math.cos(p2[1] * Math.PI / 180) *
                   Math.sin(dLng / 2) * Math.sin(dLng / 2);
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        const distance = R * c;
-        return Math.max(50, Math.round(distance * 20)); 
+        const distanceKm = R * c;
+        // Base fare ₹30 + ₹15 per km, minimum ₹50
+        const fare = Math.round(30 + distanceKm * 15);
+        return Math.max(50, fare);
     };
 
     const handleMapClick = useCallback((coords) => {
@@ -209,11 +246,13 @@ const Dashboard = ({ user, setUser }) => {
             const res = await API.post('/rides/request', {
                 pickup,
                 destination,
-                fare
+                fare,
+                passengers
             });
             setActiveRide(res.data.ride);
         } catch (err) {
-            alert(err.response?.data?.message || 'Request failed');
+            console.error("Ride request failed:", err);
+            alert(err.response?.data?.message || err.response?.data?.msg || 'Request failed');
             setSearching(false);
             setRideStatus('idle');
             setStatus('idle');
@@ -242,48 +281,76 @@ const Dashboard = ({ user, setUser }) => {
     };
 
     const handleStartTrip = async () => {
+        const rideId = activeRide?.rideId || activeRide?._id;
+        if (!rideId) {
+            alert('Ride ID not found');
+            return;
+        }
         try {
-            await API.post('/rides/start', { rideId: activeRide?.rideId || activeRide?._id });
+            await API.post('/rides/start', { rideId });
             setRideStatus('ongoing');
             setStatus('ongoing');
         } catch (err) {
+            console.error('Start trip error:', err.response?.data || err.message);
             alert('Failed to start trip');
         }
     };
 
-    const handleAcceptRide = async () => {
-        try {
-            console.log("Active Ride:", activeRide);
-            const rideId = activeRide?._id || activeRide?.ride?._id || activeRide?.rideId;
-            console.log("Sending rideId:", rideId);
+    const handleAcceptRide = () => {
+        const rideId = activeRide?._id || activeRide?.ride?._id || activeRide?.rideId;
+        const driverId = user?._id || user?.id;
 
-            if (!rideId) {
-                alert("Ride ID missing");
-                return;
-            }
-
-            const response = await API.post('/rides/accept', { rideId });
-            setActiveRide(response.data.ride); // ✅ SAVE FULL RIDE
-            setRideStatus('accepted');
-            setStatus('accepted');
-        } catch (err) {
-            console.error("Accept error:", err.response?.data || err.message);
-            alert('Failed to accept');
-            // setActiveRide(null); // 🚫 REMOVED ACCIDENTAL RESET
-            setRideStatus('idle');
-            setStatus('idle');
+        if (!rideId || !driverId) {
+            alert("Ride ID or Driver ID missing");
+            return;
         }
+
+        setLoading(true);
+        const socket = getSocket();
+        socket.emit('accept-ride', { rideId, driverId }, (response) => {
+            setLoading(false);
+            if (response.status === 'success') {
+                setRideStatus('accepted');
+                setStatus('accepted');
+            } else {
+                alert(response.message || "Failed to accept ride");
+            }
+        });
     };
 
-    const handleRejectRide = async () => {
-        try {
-            await API.post('/rides/reject', { rideId: activeRide.rideId });
+    const handleCompleteRide = () => {
+        const rideId = activeRide?.rideId || activeRide?._id;
+        if (!rideId) return;
+
+        setLoading(true);
+        const socket = getSocket();
+        socket.emit('complete-ride', { rideId }, (response) => {
+            setLoading(false);
+            if (response.status === 'success') {
+                setRideStatus('completed_summary');
+                setStatus('completed_summary');
+                setActiveRide(null);
+                setPickup(null);
+                setDestination(null);
+            }
+        });
+    };
+
+    const handleRejectRide = () => {
+        const rideId = activeRide?._id || activeRide?.rideId;
+        if (!rideId) return;
+
+        setLoading(true);
+        const socket = getSocket();
+        socket.emit('reject-ride', { rideId }, (response) => {
+            setLoading(false);
             setActiveRide(null);
             setRideStatus('idle');
             setStatus('idle');
-        } catch (err) {
-            console.error(err);
-        }
+            if (response.status === 'error') {
+                alert(response.message || "Failed to reject ride");
+            }
+        });
     };
 
     const handleLogout = () => {
@@ -296,8 +363,8 @@ const Dashboard = ({ user, setUser }) => {
     };
 
     return (
-        <div className="dashboard-container" style={{ display: 'flex', height: '100vh', background: '#f1f5f9' }}>
-            <div className="sidebar" style={{ width: '380px', background: 'white', boxShadow: '4px 0 15px rgba(0,0,0,0.05)', zIndex: 10, display: 'flex', flexDirection: 'column', padding: '24px' }}>
+        <div className="dashboard-container" style={{ display: 'flex', height: '100vh', background: '#f1f5f9', overflow: 'hidden' }}>
+            <div className="sidebar" style={{ width: '380px', minWidth: '380px', background: 'white', boxShadow: '4px 0 15px rgba(0,0,0,0.05)', zIndex: 10, display: 'flex', flexDirection: 'column', padding: '24px', overflowY: 'auto', height: '100vh' }}>
                 <div className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
                     <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#1e293b' }}>GoMoto</h1>
                     <button onClick={handleLogout} className="logout-btn" style={{ background: '#f1f5f9', border: 'none', padding: '10px', borderRadius: '12px', cursor: 'pointer' }}>
@@ -349,21 +416,37 @@ const Dashboard = ({ user, setUser }) => {
                             </div>
 
                             {rideStatus === 'idle' && (
-                                <button 
-                                    onClick={handleRequestRide}
-                                    disabled={!pickup || !destination}
-                                    style={{ width: '100%', background: '#1e293b', color: 'white', padding: '16px', borderRadius: '16px', fontWeight: 700, cursor: pickup && destination ? 'pointer' : 'not-allowed', opacity: pickup && destination ? 1 : 0.5 }}
-                                >
-                                    Request Ride
-                                </button>
+                                <>
+                                    <div style={{ marginBottom: '16px' }}>
+                                        <label style={{ fontSize: '11px', fontWeight: 800, color: '#64748b', marginBottom: '10px', display: 'block' }}>PASSENGERS</label>
+                                        <div style={{ display: 'flex', gap: '10px' }}>
+                                            {[1, 2, 3, 4].map(n => (
+                                                <button
+                                                    key={n}
+                                                    onClick={() => setPassengers(n)}
+                                                    style={{ flex: 1, padding: '10px', borderRadius: '12px', border: passengers === n ? '2px solid #1e293b' : '1px solid #e2e8f0', background: passengers === n ? '#1e293b' : 'white', color: passengers === n ? 'white' : '#475569', fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s', fontSize: '14px' }}
+                                                >
+                                                    {n}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <button 
+                                        onClick={handleRequestRide}
+                                        disabled={!pickup || !destination}
+                                        style={{ width: '100%', background: '#1e293b', color: 'white', padding: '16px', borderRadius: '16px', fontWeight: 700, cursor: pickup && destination ? 'pointer' : 'not-allowed', opacity: pickup && destination ? 1 : 0.5 }}
+                                    >
+                                        Request Ride ({passengers} {passengers === 1 ? 'passenger' : 'passengers'})
+                                    </button>
+                                </>
                             )}
 
-                            {searching && rideStatus !== 'accepted' && (
+                            {searching && rideStatus !== 'accepted' && rideStatus !== 'ongoing' && rideStatus !== 'completed_summary' && (
                                 <div className="status-searching" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', padding: '24px', background: '#f8fafc', borderRadius: '16px' }}>
                                     <Loader className="animate-spin" size={32} color="#10b981" />
-                                    <div style={{ fontWeight: 600 }}>Finding nearby drivers...</div>
+                                    <div style={{ fontWeight: 600 }}>{loading ? 'Processing...' : 'Finding nearby drivers...'}</div>
                                     {activeRide?.fare && (
-                                        <div style={{ fontSize: '18px', fontWeight: 800, color: '#1e293b' }}>Fare: ₹{activeRide.fare}</div>
+                                        <div style={{ fontSize: '18px', fontWeight: 800, color: '#1e293b' }}>Estimated Fare: ₹{activeRide.fare}</div>
                                     )}
                                     <button onClick={() => { setSearching(false); setRideStatus('idle'); setStatus('idle'); setActiveRide(null); }} style={{ fontSize: '13px', color: '#ef4444', background: 'none', border: 'none', cursor: 'pointer' }}>Cancel</button>
                                 </div>
@@ -386,14 +469,21 @@ const Dashboard = ({ user, setUser }) => {
                                     </div>
                                     
                                     <div style={{ padding: '16px', background: 'white', borderRadius: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Driver Name</span>
-                                            <span style={{ fontWeight: 700, color: '#1e293b' }}>{driverInfo?.name || activeRide?.driver?.name}</span>
-                                        </div>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Contact</span>
-                                            <span style={{ fontWeight: 600, color: rideStatus === 'accepted' ? '#10b981' : '#3b82f6' }}>📞 {driverInfo?.phone || activeRide?.driver?.phone}</span>
-                                        </div>
+                                        {(() => {
+                                            const driver = driverInfo || activeRide?.driver;
+                                            return (
+                                                <>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <span style={{ color: '#64748b', fontSize: '13px' }}>Driver Name</span>
+                                                        <span style={{ fontWeight: 700, color: '#1e293b' }}>{driver?.name}</span>
+                                                    </div>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                        <span style={{ color: '#64748b', fontSize: '13px' }}>Contact</span>
+                                                        <span style={{ fontWeight: 600, color: rideStatus === 'accepted' ? '#10b981' : '#3b82f6' }}>📞 {driver?.phone}</span>
+                                                    </div>
+                                                </>
+                                            );
+                                        })()}
                                         <div style={{ height: '1px', background: '#f1f5f9', margin: '12px 0' }}></div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                             <span style={{ color: '#64748b', fontSize: '13px' }}>Total Fare</span>
@@ -465,6 +555,10 @@ const Dashboard = ({ user, setUser }) => {
                                             <span style={{ fontWeight: 600, color: rideStatus === 'accepted' ? '#3b82f6' : '#10b981' }}>📞 {activeRide.passenger?.phone}</span>
                                         </div>
                                         <div style={{ height: '1px', background: '#f1f5f9', margin: '12px 0' }}></div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Passengers</span>
+                                            <span style={{ fontWeight: 700, color: '#2563eb', display: 'flex', alignItems: 'center', gap: '4px' }}><Users size={14} /> {activeRide?.passengers || activeRide?.passengers || 1}</span>
+                                        </div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                             <span style={{ color: '#64748b', fontSize: '13px' }}>Expected Fare</span>
                                             <span style={{ fontWeight: 800, color: '#1e293b', fontSize: '18px' }}>₹{activeRide?.fare}</span>
@@ -481,9 +575,10 @@ const Dashboard = ({ user, setUser }) => {
                                     ) : (
                                         <button 
                                             onClick={handleCompleteRide}
-                                            style={{ width: '100%', padding: '14px', borderRadius: '12px', background: '#10b981', color: 'white', fontWeight: 800, cursor: 'pointer', border: 'none', transition: 'all 0.2s' }}
+                                            disabled={loading}
+                                            style={{ width: '100%', padding: '14px', borderRadius: '12px', background: '#10b981', color: 'white', fontWeight: 800, cursor: loading ? 'not-allowed' : 'pointer', border: 'none', transition: 'all 0.2s', opacity: loading ? 0.7 : 1 }}
                                         >
-                                            COMPLETE RIDE
+                                            {loading ? 'PROCESSING...' : 'COMPLETE RIDE'}
                                         </button>
                                     )}
                                 </div>
@@ -502,11 +597,12 @@ const Dashboard = ({ user, setUser }) => {
             <div style={{ flex: 1, position: 'relative' }}>
                 <Map 
                     userLocation={pickup}
-                    pickup={user?.role === 'passenger' ? pickup : null}
-                    destination={user?.role === 'passenger' ? destination : driverDestination}
+                    pickup={user?.role === 'passenger' ? pickup : (activeRide ? activeRide.pickup : null)}
+                    destination={user?.role === 'passenger' ? destination : (activeRide ? activeRide.destination : driverDestination)}
                     markers={nearbyDrivers}
                     activeDriverLocation={activeRide?.driver?.location?.coordinates || activeRide?.driver?.location}
                     onMapClick={handleMapClick}
+                    driverView={user?.role === 'driver'}
                 />
 
                 {user?.role === 'driver' && rideStatus === 'pending_request' && activeRide && (
@@ -515,14 +611,19 @@ const Dashboard = ({ user, setUser }) => {
                             <Navigation2 size={28} color="#2563eb" />
                         </div>
                         <h3 style={{ fontSize: '20px', fontWeight: 800, marginBottom: '8px', color: '#1e293b' }}>New Ride Request</h3>
-                        <div style={{ color: '#64748b', fontSize: '14px', marginBottom: '24px' }}>
+                        <div style={{ color: '#64748b', fontSize: '14px', marginBottom: '20px' }}>
                             Passenger <strong>{activeRide.passenger?.name}</strong> is nearby.
                             <div style={{ marginTop: '8px', fontSize: '13px', color: '#3b82f6', fontWeight: 600 }}>📞 {activeRide.passenger?.phone}</div>
-                            <div style={{ marginTop: '12px', padding: '12px', background: '#f8fafc', borderRadius: '12px', fontWeight: 700, color: '#1e293b', fontSize: '16px' }}>₹{activeRide.fare}</div>
+                            <div style={{ marginTop: '10px', display: 'flex', gap: '10px' }}>
+                                <div style={{ flex: 1, padding: '12px', background: '#f8fafc', borderRadius: '12px', fontWeight: 700, color: '#1e293b', fontSize: '16px', textAlign: 'center' }}>₹{activeRide.fare}</div>
+                                <div style={{ flex: 1, padding: '12px', background: '#eff6ff', borderRadius: '12px', fontWeight: 700, color: '#2563eb', fontSize: '14px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                                    <Users size={16} /> {activeRide.passengers || 1} pax
+                                </div>
+                            </div>
                         </div>
                         <div style={{ display: 'flex', gap: '12px' }}>
-                            <button onClick={handleAcceptRide} style={{ flex: 1, background: '#1e293b', color: 'white', border: 'none', padding: '16px', borderRadius: '14px', fontWeight: 700, cursor: 'pointer' }}>Accept</button>
-                            <button onClick={handleRejectRide} style={{ flex: 1, background: '#f1f5f9', color: '#64748b', border: 'none', padding: '16px', borderRadius: '14px', fontWeight: 700, cursor: 'pointer' }}>Reject</button>
+                            <button onClick={handleAcceptRide} disabled={loading} style={{ flex: 1, background: '#1e293b', color: 'white', border: 'none', padding: '16px', borderRadius: '14px', fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1 }}>{loading ? 'Accepting...' : 'Accept'}</button>
+                            <button onClick={handleRejectRide} disabled={loading} style={{ flex: 1, background: '#f1f5f9', color: '#64748b', border: 'none', padding: '16px', borderRadius: '14px', fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1 }}>Reject</button>
                         </div>
                     </div>
                 )}
