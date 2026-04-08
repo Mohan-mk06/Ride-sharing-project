@@ -1,0 +1,84 @@
+[GoMoto Ride-Sharing System - Progress Log]
+
+[2026-04-08 12:45] SYSTEM STABILIZATION
+- Standardized socket event names to camelCase (rideAccepted, newRideRequest).
+- Fixed passenger UI sync issues; driver info now appears instantly.
+- Handled userId room registration for persistent reliable communication.
+
+[2026-04-08 13:05] FINAL ENHANCEMENTS (DRIVER-CENTRIC)
+- Implemented Stacked Notification System (10s auto-dismiss, multiple notifications).
+- Enabled rideStarted event loop (Backend -> Passenger Listener -> Status UI update).
+- Integrated Duration (mins) metrics from Mapbox Directions API.
+- Re-calibrated Fare Logic: ₹7 per km (min ₹30).
+- Handled Mapbox fallback edge cases (Defaults to min fare).
+- Fixed Driver Reset Bug: All states (destination, ride info, searching, mode) now reset upon completion.
+- Enhanced UI Cards: Displaying Distance (km), Duration (min), and Fare on both Driver and Passenger sidebars.
+- Improved UX: Added "Calculating route..." feedback during API fetches.
+- Fixed Socket Stability: Explicit socketId checks before emissions.
+
+[2026-04-08 13:35] ✅ "Accepting..." STUCK FIX & SOCKET CLEANUP
+- Fixed "Accepting..." button hang: Added setAccepting(false) to rideAccepted and rideRejected listeners.
+- Implemented 5s Safety Timeout: Increased handleAcceptRide timeout to 5s for better failure recovery.
+- Prevented Socket Stacking: Added socket.off() calls for all critical events (newRideRequest, rideAccepted, etc.) to prevent duplicate listeners and multiple log entries.
+- UI Button Refinement: The "Accept" button now strictly uses the 'accepting' state for disabled/loading feedback.
+
+[2026-04-08 13:45] 🚨 ROOT CAUSE RESOLVED (STABILITY SECURED)
+- Fixed Backend Emission: acceptRide now emits rideAccepted back to the driver socket, ensuring the frontend receives confirmation.
+- Fixed Acceptance Payload: handleAcceptRide now sends both rideId and driverId, preventing backend matching errors.
+- Fixed Socket Lifecycle: Implemented top-level useEffect for socket.connect/disconnect to prevent duplicate listeners and connection loops.
+- Improved Event Standard: Verified camelCase across all critical socket events (acceptRide, rejectRide, completeRide).
+- UI State Sync: Confirmed Driver UI transitions from 'Accepting...' to 'accepted' state instantly upon server confirmation.
+
+[NEW UPDATE - DRIVER-CENTRIC LOGIC]
+- Fixed location reset after ride completion
+- Fixed driver KM/MIN sync issue
+- Implemented route-based driver filtering
+- Passenger can now only request rides along driver's route
+- Prevented opposite-direction ride matching
+
+[CRITICAL BUG FIX PATCH]
+- Fixed setFare undefined crash
+- Fixed notification system state and UI visibility
+- Fixed accept button stuck issue with 3s safety fallback
+- Fixed complete ride not triggering reset properly
+- Fixed driver KM/MIN sync issue by adding targeted useEffect
+- Fixed API endpoint mismatch and 404 errors
+- Standardized socket registration to prevent duplicates
+- Replaced all alerts with showNotification for professional UI
+- Implemented driver-route filtering in backend (isOnRoute) with 2km detour check
+
+[FINAL STABILITY PATCH]
+- Implemented forward-direction check in matching logic (Drivers only catch riders ahead of them).
+- Added useRef timer guard for acceptance fallback (prevents false resets after a success).
+- Triggered immediate fetchDistanceAndFare on ride acceptance for instant UI sync.
+- Enhanced resetRideState to explicitly clear all map markers and routes.
+- Implemented aggressive socket listener deduplication using .off() before .on().
+
+[POST-RIDE FIX]
+- Fixed API 404 issue by verifying /api/rides/request endpoint mounting.
+- Ensured driver remains available after ride completion by resetting currentPassengers and isOnline in backend.
+- Preserved driver destination across rides by removing it from resetRideState cleanup.
+- Improved matching visibility with "BEFORE" and "AFTER" filter debug logs in backend.
+- Enhanced frontend error handling to display detailed axios error messages.
+
+[STABILITY HOTFIX]
+- Resolved semantic 404 error (No drivers found) by switching to 200 OK with success: false.
+- Fixed matching log failure by adding a 0.1km float-precision margin to the isForward check.
+- Added graceful frontend handling for matching failures, resetting searching state instead of hanging.
+
+[RIDE REVIEW SYSTEM]
+- Implemented passenger-side ride completion popup.
+- Added 1-5 star rating system with interactive UI.
+- Added feedback textarea for passenger comments.
+- Dynamic fare display in completion modal.
+- Modern glassmorphism UI with smooth animations.
+- Fixed ReferenceError by adding missing handleSubmitReview function.
+- Eliminated all legacy alert() calls in favor of the notification system.
+
+[DRIVER INFO & SYNC FIX]
+- Aligned socket events: Frontend now listens for `rideStatusUpdated` (matching backend).
+- Added `rideStarted` listener to sync "ongoing" state for passengers.
+- Fixed Info Persistence: `driverInfo` is no longer cleared prematurely during the review phase.
+- Additive State Updates: `setActiveRide` now preserves driver profile data during partial status updates.
+
+[Status] - Dashboard Fully Optimized. Sync Robust. Driver Info Persistent.

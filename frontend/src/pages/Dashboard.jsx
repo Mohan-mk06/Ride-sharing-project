@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Map from '../components/Map';
 import API from '../services/api';
 import { getSocket, subscribeToEvent, emitEvent, disconnectSocket } from '../services/socket';
@@ -23,15 +23,62 @@ const Dashboard = ({ user, setUser }) => {
     const [status, setStatus] = useState('idle'); // Backwards compatibility if needed
     const [seats, setSeats] = useState(4);
     const [loading, setLoading] = useState(false);
+    const [notifications, setNotifications] = useState([]);
+    const [distance, setDistance] = useState(null);
+    const [duration, setDuration] = useState(null);
+    const [calculatingFare, setCalculatingFare] = useState(false);
+    const [accepting, setAccepting] = useState(false); 
+    const [fare, setFare] = useState(null); // 🔥 CRITICAL FIX
+    const [incomingRide, setIncomingRide] = useState(null); // 🔥 CRITICAL FIX
+    
+    // 🎭 Review System States
+    const [showReviewModal, setShowReviewModal] = useState(false);
+    const [rating, setRating] = useState(0);
+    const [feedback, setFeedback] = useState("");
+    const [completedRideFare, setCompletedRideFare] = useState(null);
+
+    const acceptTimeoutRef = useRef(null); // 🔥 Timer fallback guard
     const navigate = useNavigate();
+
+    // 0. Socket Connection Lifecycle
+    useEffect(() => {
+        const socket = getSocket();
+        socket.connect();
+        return () => {
+            socket.disconnect(); 
+        };
+    }, []);
+
+    const showNotification = (msg, type = "info") => {
+        const id = Date.now() + Math.random();
+        setNotifications(prev => [...prev, { id, msg, type }]);
+        setTimeout(() => {
+            setNotifications(prev => prev.filter(n => n.id !== id));
+        }, 10000); // 10 sec
+    };
+
+    const resetRideState = () => {
+        setPickup(null);
+        setDestination(null);
+        setDistance(null);
+        setDuration(null);
+        setFare(null);
+        setActiveRide(null);
+        setDriverInfo(null);
+        setSearching(false);
+        setIncomingRide(null);
+        setAccepting(false);
+        setRideStatus('idle');
+        setStatus('idle');
+        // 🔥 CRITICAL: DO NOT clear driverDestination here
+    };
 
     // 1. Socket Registration
     useEffect(() => {
-        const userId = user?._id || user?.id;
-        if (!userId) return;
-
         const socket = getSocket();
-        
+        const userId = user?._id || user?.id;
+        if (!socket || !userId) return;
+
         const registrationData = user.role === 'driver' 
             ? { userId, availableSeats: seats } 
             : userId;
@@ -39,17 +86,7 @@ const Dashboard = ({ user, setUser }) => {
         console.log("📡 Registering socket:", registrationData);
         socket.emit("register", registrationData);
         
-        const handleConnect = () => {
-            console.log("📡 Re-registering socket on reconnect:", registrationData);
-            socket.emit("register", registrationData);
-        };
-        
-        socket.on("connect", handleConnect);
-        
-        return () => {
-            socket.off("connect", handleConnect);
-        };
-    }, [user?._id, user?.id, user?.role, seats]); 
+    }, [user?._id, user?.id, seats, user?.role]); 
 
     // 2. Initial Setup & Subscriptions
     useEffect(() => {
@@ -66,41 +103,83 @@ const Dashboard = ({ user, setUser }) => {
             }
         };
 
-        // Subscriptions
-        const unsubRequest = subscribeToEvent('new-ride', (data) => {
-            console.log("🔥 [Socket] RECEIVED RIDE:", data);
+        // Subscriptions cleanup before re-subscribing
+        socket.off('newRideRequest');
+        socket.off('rideRejected');
+        socket.off('rideCompleted');
+        socket.off('rideStatusUpdated');
+        socket.off('rideStarted');
+
+        const unsubRequest = subscribeToEvent('newRideRequest', (data) => {
+            console.log("🔥 [Socket] RECEIVED RIDE REQUEST:", data);
             setActiveRide(data);
             setRideStatus('pending_request');
             setStatus('pending_request');
+            if (user?.role === 'driver') {
+                showNotification(`📍 New ride request from ${data.passenger?.name} - ₹${data.fare}`);
+            }
         });
         
 
         const unsubRejected = subscribeToEvent('rideRejected', () => {
             console.log("❌ [Socket] Ride rejected");
-            alert('Your ride request was rejected. Please try again.');
+            showNotification('Your ride request was rejected. Please try again.', 'error');
             setActiveRide(null);
             setSearching(false);
             setLoading(false);
+            setAccepting(false); // 🔥 RESET HERE ALSO
             setRideStatus('idle');
             setStatus('idle');
         });
 
         const unsubCompleted = subscribeToEvent('rideCompleted', (data) => {
-            console.log("✅ [Socket] Ride completed:", data);
-            setLoading(false);
-            setActiveRide(prev => ({ ...prev, ...(data.ride || {}), status: 'completed' }));
+            console.log("🏁 [Socket] Ride Completed:", data);
+            
+            if (user?.role === 'passenger') {
+                setCompletedRideFare(data.ride?.fare || 0);
+                // Capture driver info for modal before reset
+                if (data.ride?.driver) setDriverInfo(data.ride.driver);
+                setShowReviewModal(true);
+            }
+
+            // We specifically don't call resetRideState() here for passengers 
+            // so they can see the driver info and fare in the modal.
+            // For drivers, we reset immediately.
+            if (user?.role === 'driver') {
+                resetRideState();
+            }
             setRideStatus('completed_summary');
             setStatus('completed_summary');
-            setSearching(false);
         });
 
         const unsubStatus = subscribeToEvent('rideStatusUpdated', (data) => {
-            console.log("📡 [Socket] Ride status updated:", data.status);
-            setRideStatus(data.status);
-            setStatus(data.status);
-            setActiveRide(prev => ({ ...prev, status: data.status }));
+            console.log("📈 [Socket] Status Update:", data.status);
+            setActiveRide(prev => {
+                const updated = { ...prev, ...data.ride, status: data.status };
+                // Preserve driver info if the update is partial
+                if (!updated.driver && prev?.driver) updated.driver = prev.driver;
+                return updated;
+            });
+            
+            if (data.status === 'ongoing' && user?.role === 'passenger') {
+                showNotification("🚗 Driver has started the trip", "info");
+                setRideStatus('ongoing');
+                setStatus('ongoing');
+            }
+            if (data.status === 'completed') {
+                setRideStatus('completed_summary');
+                setStatus('completed_summary');
+            }
         });
 
+        const unsubStarted = subscribeToEvent('rideStarted', (data) => {
+            console.log("🚀 [Socket] Ride Started:", data);
+            setActiveRide(prev => ({ ...prev, ...data.ride, status: 'ongoing' }));
+            setRideStatus('ongoing');
+            setStatus('ongoing');
+        });
+
+        socket.off('driverLocationUpdated');
         const unsubLocUpdate = subscribeToEvent('driverLocationUpdated', (data) => {
             setNearbyDrivers(prev => {
                 const existing = prev.find(d => d._id === data.driverId);
@@ -124,9 +203,10 @@ const Dashboard = ({ user, setUser }) => {
             }
         });
 
+        socket.off('ride-error');
         const unsubError = subscribeToEvent('ride-error', (msg) => {
             console.error("⚠️ [Socket Error]:", msg);
-            alert(msg);
+            showNotification(msg, 'error');
             setLoading(false);
         });
 
@@ -142,29 +222,57 @@ const Dashboard = ({ user, setUser }) => {
             unsubRejected();
             unsubCompleted();
             unsubStatus();
+            unsubStarted();
             unsubLocUpdate();
             unsubError();
         };
-    }, [user, activeRide?.driver?.id, activeRide?.driver?._id]);
+    }, [user, activeRide?._id]);
 
     // 2.3 Ride Accepted Listener (Dedicated)
     useEffect(() => {
         const socket = getSocket();
+        socket.off("rideAccepted"); // PREVENT STACKING
+
         const handleRideAccepted = (data) => {
-            console.log("✅ ride-accepted RECEIVED:", data);
+            console.log("✅ rideAccepted RECEIVED:", data);
+            
+            // 🔥 Timer Reset
+            if (acceptTimeoutRef.current) {
+                clearTimeout(acceptTimeoutRef.current);
+                acceptTimeoutRef.current = null;
+            }
+
+            // CRITICAL: Stop searching and update state immediately
             setSearching(false);
             setLoading(false);
             setRideStatus('accepted');
             setStatus('accepted');
             setDriverInfo(data.driver);
             setActiveRide(data.ride);
+            setAccepting(false); // 🔥 FIX
+            setIncomingRide(null); // 🔥 FIX
+            
+            // 🔥 SYNC METRICS IMMEDIATELY
+            if (data.ride?.pickup && data.ride?.destination) {
+                fetchDistanceAndFare(data.ride.pickup, data.ride.destination);
+            }
+            
+            // Show notification if passenger
+            if (user?.role === 'passenger') {
+                const driverName = data.driver?.name || 'A driver';
+                const fareValue = data.ride?.fare || '';
+                showNotification(`🚗 ${driverName} accepted your ride. Fare: ₹${fareValue}`, 'success');
+            }
+            if (user?.role === 'driver') {
+                showNotification("Ride accepted successfully 🚀", "success");
+            }
         };
 
-        socket.on("ride-accepted", handleRideAccepted);
+        socket.on("rideAccepted", handleRideAccepted);
         return () => {
-            socket.off("ride-accepted", handleRideAccepted);
+            socket.off("rideAccepted", handleRideAccepted);
         };
-    }, []); 
+    }, [user?.role]); 
 
     // 2.5 Reliability Fallback
     useEffect(() => {
@@ -201,20 +309,66 @@ const Dashboard = ({ user, setUser }) => {
     }, [user?.role, isOnline]);
 
 
-    const calculateFare = (p1, p2) => {
-        if (!p1 || !p2) return 0;
-        const R = 6371;
-        const dLat = (p2[1] - p1[1]) * Math.PI / 180;
-        const dLng = (p2[0] - p1[0]) * Math.PI / 180;
-        const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                  Math.cos(p1[1] * Math.PI / 180) * Math.cos(p2[1] * Math.PI / 180) *
-                  Math.sin(dLng / 2) * Math.sin(dLng / 2);
-        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        const distanceKm = R * c;
-        // Base fare ₹30 + ₹15 per km, minimum ₹50
-        const fare = Math.round(30 + distanceKm * 15);
-        return Math.max(50, fare);
-    };
+
+
+    const fetchDistanceAndFare = useCallback(async (p1, p2) => {
+        if (!p1 || !p2) return;
+        
+        setSearching(false); // Make sure we are not in searching state yet
+        setCalculatingFare(true);
+        
+        try {
+            const token = import.meta.env.VITE_MAPBOX_TOKEN;
+            const url = `https://api.mapbox.com/directions/v5/mapbox/driving/${p1[0]},${p1[1]};${p2[0]},${p2[1]}?geometries=geojson&access_token=${token}`;
+            
+            const res = await fetch(url);
+            const data = await res.json();
+            
+            if (data.routes && data.routes[0]) {
+                const distanceKm = data.routes[0].distance / 1000;
+                const durationMins = Math.round(data.routes[0].duration / 60);
+                
+                setDistance(distanceKm);
+                setDuration(durationMins);
+                
+                // Set fare dynamically (₹7 per km), min ₹30
+                const calculatedFare = Math.max(30, Math.round(distanceKm * 7));
+                setFare(calculatedFare); // 🔥 FIX: Set fare state
+                
+                if (activeRide && searching) {
+                    setActiveRide(prev => ({ ...prev, fare: calculatedFare, distance: distanceKm, duration: durationMins }));
+                }
+                
+                setCalculatingFare(false);
+                return calculatedFare;
+            } else {
+                // Safety check fallback
+                setDistance(null);
+                setDuration(null);
+                setFare(null);
+                setCalculatingFare(false);
+                return 30;
+            }
+        } catch (error) {
+            console.error('Fare calculation error:', error);
+            setCalculatingFare(false);
+            setFare(30);
+            return 30;
+        }
+    }, [activeRide, searching]);
+
+    // 2.4 Driver Metrics Sync
+    useEffect(() => {
+        if (pickup && destination && user?.role === 'driver') {
+            fetchDistanceAndFare(pickup, destination);
+        }
+    }, [pickup, destination, user?.role, fetchDistanceAndFare]);
+
+    useEffect(() => {
+        if (pickup && destination && user?.role === 'passenger' && rideStatus === 'idle') {
+            fetchDistanceAndFare(pickup, destination);
+        }
+    }, [pickup, destination, user?.role, rideStatus, fetchDistanceAndFare]);
 
     const handleMapClick = useCallback((coords) => {
         if (rideStatus !== 'idle' && rideStatus !== 'pending_request') return;
@@ -235,13 +389,19 @@ const Dashboard = ({ user, setUser }) => {
 
     const handleRequestRide = async () => {
         if (!pickup || !destination) return;
-        const fare = calculateFare(pickup, destination);
+        
+        let fare = 0;
+        if (distance) {
+            fare = Math.max(30, Math.round(distance * 7));
+        } else {
+            fare = await fetchDistanceAndFare(pickup, destination);
+        }
         
         setSearching(true);
         setRideStatus('searching');
         setStatus('searching');
 
-        console.log("Sending:", pickup, destination);
+        console.log("📡 Sending ride request to /rides/request:", pickup, destination, fare);
         try {
             const res = await API.post('/rides/request', {
                 pickup,
@@ -249,10 +409,20 @@ const Dashboard = ({ user, setUser }) => {
                 fare,
                 passengers
             });
+
+            if (res.data.success === false) {
+                showNotification(res.data.message || "No drivers available", "info");
+                setSearching(false);
+                setRideStatus('idle');
+                setStatus('idle');
+                return;
+            }
+
             setActiveRide(res.data.ride);
         } catch (err) {
             console.error("Ride request failed:", err);
-            alert(err.response?.data?.message || err.response?.data?.msg || 'Request failed');
+            const errorMsg = err.response?.data?.message || err.response?.data?.msg || err.message || 'Request failed';
+            showNotification(`Ride request failed: ${errorMsg}`, 'error');
             setSearching(false);
             setRideStatus('idle');
             setStatus('idle');
@@ -276,14 +446,14 @@ const Dashboard = ({ user, setUser }) => {
                 setIsOnline(false);
             }
         } catch (err) {
-            alert('Action failed');
+            showNotification('Action failed', 'error');
         }
     };
 
     const handleStartTrip = async () => {
         const rideId = activeRide?.rideId || activeRide?._id;
         if (!rideId) {
-            alert('Ride ID not found');
+            showNotification('Ride ID not found', 'error');
             return;
         }
         try {
@@ -292,30 +462,38 @@ const Dashboard = ({ user, setUser }) => {
             setStatus('ongoing');
         } catch (err) {
             console.error('Start trip error:', err.response?.data || err.message);
-            alert('Failed to start trip');
+            showNotification('Failed to start trip', 'error');
         }
     };
 
     const handleAcceptRide = () => {
-        const rideId = activeRide?._id || activeRide?.ride?._id || activeRide?.rideId;
+        const rideId = activeRide?._id || activeRide?.rideId;
         const driverId = user?._id || user?.id;
-
-        if (!rideId || !driverId) {
-            alert("Ride ID or Driver ID missing");
-            return;
-        }
+        if (!rideId || !driverId) return;
 
         setLoading(true);
+        setAccepting(true); // 🔥 SET ACCEPTING
         const socket = getSocket();
-        socket.emit('accept-ride', { rideId, driverId }, (response) => {
+        
+        console.log("📡 Emitting acceptRide:", rideId, driverId);
+        socket.emit('acceptRide', { rideId, driverId }, (response) => {
             setLoading(false);
-            if (response.status === 'success') {
-                setRideStatus('accepted');
-                setStatus('accepted');
-            } else {
-                alert(response.message || "Failed to accept ride");
+            if (response.status === 'error') {
+                showNotification(response.message || "Failed to accept ride", "error");
+                setAccepting(false);
+                if (acceptTimeoutRef.current) {
+                    clearTimeout(acceptTimeoutRef.current);
+                    acceptTimeoutRef.current = null;
+                }
             }
         });
+
+        // 🔥 Fallback safety (3s as requested)
+        if (acceptTimeoutRef.current) clearTimeout(acceptTimeoutRef.current);
+        acceptTimeoutRef.current = setTimeout(() => {
+            setAccepting(false);
+            acceptTimeoutRef.current = null;
+        }, 3000);
     };
 
     const handleCompleteRide = () => {
@@ -324,16 +502,15 @@ const Dashboard = ({ user, setUser }) => {
 
         setLoading(true);
         const socket = getSocket();
-        socket.emit('complete-ride', { rideId }, (response) => {
+        socket.emit('completeRide', { rideId }, (response) => {
             setLoading(false);
             if (response.status === 'success') {
-                setRideStatus('completed_summary');
-                setStatus('completed_summary');
-                setActiveRide(null);
-                setPickup(null);
-                setDestination(null);
+                resetRideState(); // 🔥 ENSURE CALL
             }
         });
+        
+        // Safety call for driver side experience
+        resetRideState();
     };
 
     const handleRejectRide = () => {
@@ -342,15 +519,25 @@ const Dashboard = ({ user, setUser }) => {
 
         setLoading(true);
         const socket = getSocket();
-        socket.emit('reject-ride', { rideId }, (response) => {
+        socket.emit('rejectRide', { rideId }, (response) => {
             setLoading(false);
             setActiveRide(null);
             setRideStatus('idle');
             setStatus('idle');
             if (response.status === 'error') {
-                alert(response.message || "Failed to reject ride");
+                showNotification(response.message || "Failed to reject ride", "error");
             }
         });
+    };
+
+    const handleSubmitReview = () => {
+        console.log("Rating:", rating);
+        console.log("Feedback:", feedback);
+        showNotification("Thanks for your feedback!", "success");
+        setShowReviewModal(false);
+        setRating(0);
+        setFeedback("");
+        resetRideState(); // 🔥 FINALLY RESET HERE
     };
 
     const handleLogout = () => {
@@ -364,6 +551,16 @@ const Dashboard = ({ user, setUser }) => {
 
     return (
         <div className="dashboard-container" style={{ display: 'flex', height: '100vh', background: '#f1f5f9', overflow: 'hidden' }}>
+            {/* Notification System Rendering */}
+            <div className="notification-container" style={{ position: 'fixed', top: '24px', right: '24px', zIndex: 9999, display: 'flex', flexDirection: 'column', gap: '12px', pointerEvents: 'none' }}>
+                {notifications.map(n => (
+                    <div key={n.id} className={`notification-toast ${n.type}`} style={{ pointerEvents: 'auto', background: n.type === 'success' ? '#10b981' : n.type === 'error' ? '#ef4444' : '#1e293b', color: 'white', padding: '16px 24px', borderRadius: '16px', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '12px', animation: 'slideIn 0.3s ease-out' }}>
+                        {n.type === 'success' ? <CheckCircle size={20} /> : n.type === 'error' ? <XCircle size={20} /> : <Zap size={20} />}
+                        {n.msg}
+                    </div>
+                ))}
+            </div>
+
             <div className="sidebar" style={{ width: '380px', minWidth: '380px', background: 'white', boxShadow: '4px 0 15px rgba(0,0,0,0.05)', zIndex: 10, display: 'flex', flexDirection: 'column', padding: '24px', overflowY: 'auto', height: '100vh' }}>
                 <div className="header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
                     <h1 style={{ fontSize: '24px', fontWeight: 800, color: '#1e293b' }}>GoMoto</h1>
@@ -415,31 +612,47 @@ const Dashboard = ({ user, setUser }) => {
                                 </div>
                             </div>
 
-                            {rideStatus === 'idle' && (
-                                <>
-                                    <div style={{ marginBottom: '16px' }}>
-                                        <label style={{ fontSize: '11px', fontWeight: 800, color: '#64748b', marginBottom: '10px', display: 'block' }}>PASSENGERS</label>
-                                        <div style={{ display: 'flex', gap: '10px' }}>
-                                            {[1, 2, 3, 4].map(n => (
-                                                <button
-                                                    key={n}
-                                                    onClick={() => setPassengers(n)}
-                                                    style={{ flex: 1, padding: '10px', borderRadius: '12px', border: passengers === n ? '2px solid #1e293b' : '1px solid #e2e8f0', background: passengers === n ? '#1e293b' : 'white', color: passengers === n ? 'white' : '#475569', fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s', fontSize: '14px' }}
-                                                >
-                                                    {n}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-                                    <button 
-                                        onClick={handleRequestRide}
-                                        disabled={!pickup || !destination}
-                                        style={{ width: '100%', background: '#1e293b', color: 'white', padding: '16px', borderRadius: '16px', fontWeight: 700, cursor: pickup && destination ? 'pointer' : 'not-allowed', opacity: pickup && destination ? 1 : 0.5 }}
-                                    >
-                                        Request Ride ({passengers} {passengers === 1 ? 'passenger' : 'passengers'})
-                                    </button>
-                                </>
-                            )}
+                                    {rideStatus === 'idle' && (
+                                        <>
+                                            <div style={{ marginBottom: '16px' }}>
+                                                <label style={{ fontSize: '11px', fontWeight: 800, color: '#64748b', marginBottom: '10px', display: 'block' }}>PASSENGERS</label>
+                                                <div style={{ display: 'flex', gap: '10px' }}>
+                                                    {[1, 2, 3, 4].map(n => (
+                                                        <button
+                                                            key={n}
+                                                            onClick={() => setPassengers(n)}
+                                                            style={{ flex: 1, padding: '10px', borderRadius: '12px', border: passengers === n ? '2px solid #1e293b' : '1px solid #e2e8f0', background: passengers === n ? '#1e293b' : 'white', color: passengers === n ? 'white' : '#475569', fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s', fontSize: '14px' }}
+                                                        >
+                                                            {n}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                            
+                                            {calculatingFare ? (
+                                                <div style={{ padding: '16px', borderRadius: '16px', background: '#f8fafc', border: '1px dashed #cbd5e1', textAlign: 'center', marginBottom: '16px' }}>
+                                                    <Loader className="animate-spin" size={16} color="#64748b" style={{ display: 'inline-block', marginRight: '8px' }} />
+                                                    <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748b' }}>Calculating route...</span>
+                                                </div>
+                                            ) : distance && (
+                                                <div style={{ padding: '16px', borderRadius: '16px', background: '#eff6ff', border: '1px solid #bfdbfe', marginBottom: '16px' }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                                                        <span style={{ fontSize: '13px', color: '#1e40af', fontWeight: 600 }}>Distance: {distance.toFixed(2)} km</span>
+                                                        <span style={{ fontSize: '16px', color: '#1e3a8a', fontWeight: 800 }}>₹{Math.max(30, Math.round(distance * 7))}</span>
+                                                    </div>
+                                                    <div style={{ fontSize: '12px', color: '#3b82f6', fontWeight: 500 }}>Est. Time: {duration} mins</div>
+                                                </div>
+                                            )}
+
+                                            <button 
+                                                onClick={handleRequestRide}
+                                                disabled={!pickup || !destination || calculatingFare}
+                                                style={{ width: '100%', background: '#1e293b', color: 'white', padding: '16px', borderRadius: '16px', fontWeight: 700, cursor: pickup && destination && !calculatingFare ? 'pointer' : 'not-allowed', opacity: pickup && destination && !calculatingFare ? 1 : 0.5 }}
+                                            >
+                                                Request Ride ({passengers} {passengers === 1 ? 'passenger' : 'passengers'})
+                                            </button>
+                                        </>
+                                    )}
 
                             {searching && rideStatus !== 'accepted' && rideStatus !== 'ongoing' && rideStatus !== 'completed_summary' && (
                                 <div className="status-searching" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', padding: '24px', background: '#f8fafc', borderRadius: '16px' }}>
@@ -460,7 +673,7 @@ const Dashboard = ({ user, setUser }) => {
                                         </div>
                                         <div>
                                             <div style={{ fontWeight: 800, color: rideStatus === 'accepted' ? '#065f46' : '#1d4ed8', fontSize: '16px' }}>
-                                                {rideStatus === 'accepted' ? 'Driver Arriving' : 'Ride in Progress'}
+                                                {rideStatus === 'accepted' ? 'Driver Found' : rideStatus === 'ongoing' ? 'Ride in Progress' : 'Trip Finished'}
                                             </div>
                                             <div style={{ fontSize: '12px', color: rideStatus === 'accepted' ? '#047857' : '#2563eb' }}>
                                                 {rideStatus === 'accepted' ? 'Meet at pickup location' : 'Heading to destination'}
@@ -485,6 +698,10 @@ const Dashboard = ({ user, setUser }) => {
                                             );
                                         })()}
                                         <div style={{ height: '1px', background: '#f1f5f9', margin: '12px 0' }}></div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Distance / Time</span>
+                                            <span style={{ fontWeight: 700, color: '#1e293b' }}>{activeRide?.distance?.toFixed(2) || distance?.toFixed(2)} km / {activeRide?.duration || duration} min</span>
+                                        </div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                             <span style={{ color: '#64748b', fontSize: '13px' }}>Total Fare</span>
                                             <span style={{ fontWeight: 800, color: '#1e293b', fontSize: '18px' }}>₹{activeRide?.fare}</span>
@@ -556,8 +773,14 @@ const Dashboard = ({ user, setUser }) => {
                                         </div>
                                         <div style={{ height: '1px', background: '#f1f5f9', margin: '12px 0' }}></div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                            <span style={{ color: '#64748b', fontSize: '13px' }}>Ride Metrics</span>
+                                            <span style={{ fontWeight: 700 }}>
+                                                {distance ? `${distance} km` : "—"} / {duration ? `${duration} min` : "—"}
+                                            </span>
+                                        </div>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                                             <span style={{ color: '#64748b', fontSize: '13px' }}>Passengers</span>
-                                            <span style={{ fontWeight: 700, color: '#2563eb', display: 'flex', alignItems: 'center', gap: '4px' }}><Users size={14} /> {activeRide?.passengers || activeRide?.passengers || 1}</span>
+                                            <span style={{ fontWeight: 700, color: '#2563eb', display: 'flex', alignItems: 'center', gap: '4px' }}><Users size={14} /> {activeRide?.passengers || 1}</span>
                                         </div>
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                             <span style={{ color: '#64748b', fontSize: '13px' }}>Expected Fare</span>
@@ -595,6 +818,29 @@ const Dashboard = ({ user, setUser }) => {
             </div>
 
             <div style={{ flex: 1, position: 'relative' }}>
+                <div className="notification-container" style={{ position: 'absolute', top: '24px', left: '50%', transform: 'translateX(-50%)', zIndex: 2000, display: 'flex', flexDirection: 'column', gap: '10px', pointerEvents: 'none' }}>
+                    {notifications.map(n => (
+                        <div key={n.id} className={`notification ${n.type} fade-in`} style={{ 
+                            background: n.type === 'error' ? '#ef4444' : n.type === 'success' ? '#10b981' : '#1e293b', 
+                            color: 'white', 
+                            padding: '12px 24px', 
+                            borderRadius: '16px', 
+                            boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)', 
+                            fontWeight: 600,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            minWidth: '320px',
+                            justifyContent: 'center',
+                            pointerEvents: 'auto',
+                            animation: 'fadeIn 0.3s ease-out, fadeOut 0.5s ease-in 9.5s'
+                        }}>
+                            {n.type === 'success' ? <CheckCircle size={18} /> : n.type === 'error' ? <XCircle size={18} /> : <Zap size={18} />}
+                            {n.message}
+                        </div>
+                    ))}
+                </div>
+
                 <Map 
                     userLocation={pickup}
                     pickup={user?.role === 'passenger' ? pickup : (activeRide ? activeRide.pickup : null)}
@@ -622,7 +868,13 @@ const Dashboard = ({ user, setUser }) => {
                             </div>
                         </div>
                         <div style={{ display: 'flex', gap: '12px' }}>
-                            <button onClick={handleAcceptRide} disabled={loading} style={{ flex: 1, background: '#1e293b', color: 'white', border: 'none', padding: '16px', borderRadius: '14px', fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1 }}>{loading ? 'Accepting...' : 'Accept'}</button>
+                            <button 
+                                onClick={handleAcceptRide} 
+                                disabled={accepting} 
+                                style={{ flex: 1, background: '#1e293b', color: 'white', border: 'none', padding: '16px', borderRadius: '14px', fontWeight: 700, cursor: accepting ? 'not-allowed' : 'pointer', opacity: accepting ? 0.7 : 1 }}
+                            >
+                                {accepting ? 'Accepting...' : 'Accept'}
+                            </button>
                             <button onClick={handleRejectRide} disabled={loading} style={{ flex: 1, background: '#f1f5f9', color: '#64748b', border: 'none', padding: '16px', borderRadius: '14px', fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.7 : 1 }}>Reject</button>
                         </div>
                     </div>
@@ -647,7 +899,7 @@ const Dashboard = ({ user, setUser }) => {
                                     <span style={{ fontSize: '20px', fontWeight: 800, color: '#1e293b' }}>₹{activeRide.fare}</span>
                                 </div>
                             </div>
-                            <button onClick={() => { setRideStatus('idle'); setStatus('idle'); setActiveRide(null); }} style={{ width: '100%', background: '#1e293b', color: 'white', padding: '16px', borderRadius: '16px', fontWeight: 700, cursor: 'pointer', border: 'none' }}>Back to Map</button>
+                            <button onClick={() => { setRideStatus('idle'); setStatus('idle'); setActiveRide(null); resetRideState(); }} style={{ width: '100%', background: '#1e293b', color: 'white', padding: '16px', borderRadius: '16px', fontWeight: 700, cursor: 'pointer', border: 'none' }}>Back to Map</button>
                         </div>
                     </div>
                 )}
@@ -659,6 +911,95 @@ const Dashboard = ({ user, setUser }) => {
                 @keyframes bike-pulse-anim { 0% { transform: scale(1); opacity: 0.4; } 100% { transform: scale(2.5); opacity: 0; } }
                 .fade-in { animation: fadeIn 0.3s ease-out; }
                 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+                @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+                @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+            `}</style>
+            {showReviewModal && (
+                <div className="modal-overlay">
+                    <div className="modal">
+                        <h2>🎉 Ride Completed</h2>
+                        <p className="pay-text">Pay ₹{completedRideFare} to driver</p>
+                        
+                        <div className="stars">
+                            {[1, 2, 3, 4, 5].map((star) => (
+                                <span
+                                    key={star}
+                                    onClick={() => setRating(star)}
+                                    className={`star ${star <= rating ? "active-star" : ""}`}
+                                >
+                                    ★
+                                </span>
+                            ))}
+                        </div>
+
+                        <textarea
+                            className="review-textarea"
+                            placeholder="Write feedback..."
+                            value={feedback}
+                            onChange={(e) => setFeedback(e.target.value)}
+                        />
+
+                        <button className="submit-review-btn" onClick={handleSubmitReview}>
+                            Submit
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            <style>{`
+                .modal-overlay {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100vw;
+                    height: 100vh;
+                    background: rgba(0,0,0,0.6);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 10000;
+                    backdrop-filter: blur(4px);
+                }
+                .modal {
+                    background: white;
+                    padding: 30px;
+                    border-radius: 20px;
+                    width: 340px;
+                    text-align: center;
+                    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+                    animation: modalIn 0.3s ease-out;
+                }
+                @keyframes modalIn {
+                    from { transform: translateY(20px); opacity: 0; }
+                    to { transform: translateY(0); opacity: 1; }
+                }
+                .modal h2 { margin-bottom: 10px; color: #1f2937; }
+                .pay-text { font-size: 1.2rem; font-weight: 600; color: #059669; margin-bottom: 20px; }
+                .stars { margin-bottom: 20px; display: flex; justify-content: center; gap: 8px; }
+                .star { font-size: 32px; cursor: pointer; color: #d1d5db; transition: transform 0.1s; }
+                .star:hover { transform: scale(1.1); }
+                .active-star { color: #f59e0b; }
+                .review-textarea {
+                    width: 100%;
+                    height: 80px;
+                    padding: 12px;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 10px;
+                    margin-bottom: 20px;
+                    font-family: inherit;
+                    resize: none;
+                }
+                .submit-review-btn {
+                    width: 100%;
+                    padding: 12px;
+                    background: #1f2937;
+                    color: white;
+                    border-radius: 10px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: background 0.2s;
+                }
+                .submit-review-btn:hover { background: #374151; }
             `}</style>
         </div>
     );

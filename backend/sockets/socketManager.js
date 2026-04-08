@@ -25,7 +25,7 @@ const socketManager = (io) => {
                 if (currentUserId !== userId.toString()) {
                     currentUserId = userId.toString();
                     socket.join(currentUserId);
-                    console.log(`👤 User ${currentUserId} joined room`);
+                    console.log(`👤 User joining room: ${currentUserId}`);
                 }
                 
                 try {
@@ -86,7 +86,7 @@ const socketManager = (io) => {
             }
         });
 
-        socket.on("accept-ride", async ({ rideId, driverId }, callback) => {
+        socket.on("acceptRide", async ({ rideId, driverId }, callback) => {
             console.log(`🚖 [${new Date().toLocaleTimeString()}] Accept request: Ride ${rideId} by Driver ${driverId}`);
             try {
                 // 1. Validation & Idempotency
@@ -157,20 +157,28 @@ const socketManager = (io) => {
                     }
                 };
 
-                emitToUser(ride.passengerId, "ride-accepted", payload);
+                // 4. Send to passenger room
+                emitToUser(ride.passengerId, "rideAccepted", payload);
                 
-                // ACK back to driver
+                // 5. 🔥 SEND BACK TO DRIVER (CRITICAL FIX)
+                socket.emit("rideAccepted", {
+                    rideId: updatedRide._id,
+                    ride: updatedRide,
+                    driver: payload.driver
+                });
+                
+                // ACK back to driver callback
                 if (callback) callback({ status: 'success', ride: updatedRide });
 
-                console.log(`✅ [${new Date().toLocaleTimeString()}] Ride ${rideId} accepted by ${driver.name}`);
+                console.log("✅ Ride accepted and emitted to both sides");
             } catch (err) {
-                console.error("accept-ride error:", err);
+                console.error("❌ Accept error:", err);
                 if (callback) callback({ status: 'error', message: 'Server error' });
-                socket.emit("ride-error", "Failed to accept ride");
+                socket.emit("rideError", "Failed to accept ride");
             }
         });
 
-        socket.on("reject-ride", async ({ rideId }, callback) => {
+        socket.on("rejectRide", async ({ rideId }, callback) => {
             console.log(`❌ [${new Date().toLocaleTimeString()}] Reject request: Ride ${rideId}`);
             try {
                 const ride = await Ride.findById(rideId);
@@ -194,8 +202,8 @@ const socketManager = (io) => {
             }
         });
 
-        socket.on("complete-ride", async ({ rideId }, callback) => {
-            console.log(`🏁 Completion request: Ride ${rideId}`);
+        socket.on("completeRide", async ({ rideId }, callback) => {
+            console.log(`🏁 [${new Date().toLocaleTimeString()}] Complete request: Ride ${rideId}`);
             try {
                 const ride = await Ride.findById(rideId);
                 if (!ride) return;
@@ -211,6 +219,12 @@ const socketManager = (io) => {
                     driver.availableSeats += ride.passengers;
                     if (driver.currentPassengers < 0) driver.currentPassengers = 0;
                     await driver.save();
+                    
+                    // 🔥 CRITICAL: Ensure driver is marked online and available for next ride
+                    await User.findByIdAndUpdate(ride.driverId, {
+                        isOnline: true,
+                        currentPassengers: 0
+                    });
                 }
                 
                 ride.status = "completed";
@@ -221,7 +235,7 @@ const socketManager = (io) => {
                 if (callback) callback({ status: 'success' });
                 console.log(`✅ Ride ${rideId} completed`);
             } catch (err) {
-                console.error("complete-ride error:", err);
+                console.error("completeRide error:", err);
                 if (callback) callback({ status: 'error', message: 'Server error' });
             }
         });
