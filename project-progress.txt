@@ -107,6 +107,13 @@
 - Automated Ride Completion: System triggers handleCompleteRide once simulation reaches destination.
 - Passenger Review Modal opens automatically upon simulated arrival.
 
+[EARNINGS + RIDE HISTORY]
+- Implemented ride history API for driver & passenger.
+- Added driver earnings calculation (total rides, total earnings).
+- Integrated frontend dashboard cards (Earnings and History).
+- Auto-refresh history and stats after each ride completion.
+- Ensured no changes to existing ride flow or socket logic.
+
 [STABILITY HOTFIX: MAP REFERENCEERROR]
 - Fixed ReferenceError: remainingPath was not defined in Map.jsx.
 - Properly added remainingPath to component prop destructuring.

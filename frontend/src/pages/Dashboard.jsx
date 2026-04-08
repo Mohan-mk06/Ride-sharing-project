@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Map from '../components/Map';
 import API from '../services/api';
 import { getSocket, subscribeToEvent, emitEvent, disconnectSocket } from '../services/socket';
-import { LogOut, ToggleLeft, ToggleRight, MapPin, Navigation, User, CheckCircle, XCircle, Loader, Navigation2, Users, Phone, Zap } from 'lucide-react';
+import { LogOut, ToggleLeft, ToggleRight, MapPin, Navigation, User, CheckCircle, XCircle, Loader, Navigation2, Users, Phone, Zap, CreditCard, History, Calendar } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 const Dashboard = ({ user, setUser }) => {
@@ -39,6 +39,8 @@ const Dashboard = ({ user, setUser }) => {
     const [routeCoordinates, setRouteCoordinates] = useState([]); // 🔥 For simulation
     const [driverLocation, setDriverLocation] = useState(null); // 🔥 Moving marker
     const [remainingPath, setRemainingPath] = useState([]); // 🔥 For disappearing line
+    const [rideHistory, setRideHistory] = useState([]);
+    const [driverStats, setDriverStats] = useState(null);
 
     const acceptTimeoutRef = useRef(null); // 🔥 Timer fallback guard
     const intervalRef = useRef(null); // 🔥 Prevent duplicates
@@ -150,10 +152,7 @@ const Dashboard = ({ user, setUser }) => {
 
             // We specifically don't call resetRideState() here for passengers 
             // so they can see the driver info and fare in the modal.
-            // For drivers, we reset immediately.
-            if (user?.role === 'driver') {
-                resetRideState();
-            }
+            fetchHistory();
             setRideStatus('completed_summary');
             setStatus('completed_summary');
         });
@@ -376,6 +375,30 @@ const Dashboard = ({ user, setUser }) => {
         };
     }, []);
 
+    const fetchHistory = useCallback(async () => {
+        try {
+            const { data } = await API.get('/rides/history');
+            setRideHistory(data);
+        } catch (err) {
+            console.error('History fetch error:', err);
+        }
+    }, []);
+
+    const fetchDriverStats = useCallback(async () => {
+        if (user?.role !== 'driver') return;
+        try {
+            const { data } = await API.get('/rides/driver-stats');
+            setDriverStats(data);
+        } catch (err) {
+            console.error('Stats fetch error:', err);
+        }
+    }, [user?.role]);
+
+    useEffect(() => {
+        fetchHistory();
+        if (user?.role === 'driver') fetchDriverStats();
+    }, [fetchHistory, fetchDriverStats, user?.role]);
+
 
 
 
@@ -570,6 +593,7 @@ const Dashboard = ({ user, setUser }) => {
 
     const handleCompleteRide = () => {
         const rideId = activeRide?.rideId || activeRide?._id;
+        const fareAmt = activeRide?.fare || 0;
         if (!rideId) return;
 
         setLoading(true);
@@ -577,12 +601,14 @@ const Dashboard = ({ user, setUser }) => {
         socket.emit('completeRide', { rideId }, (response) => {
             setLoading(false);
             if (response.status === 'success') {
+                showNotification(`Ride request complete. Collect ₹${fareAmt} from passenger.`, "success");
                 resetRideState(); // 🔥 ENSURE CALL
+                fetchDriverStats();
+                fetchHistory();
+            } else {
+                showNotification(response.message || "Failed to complete ride", "error");
             }
         });
-        
-        // Safety call for driver side experience
-        resetRideState();
     };
 
     const handleRejectRide = () => {
@@ -886,6 +912,79 @@ const Dashboard = ({ user, setUser }) => {
                             )}
                         </>
                     )}
+
+                    <div style={{ marginTop: '32px' }}>
+                        {/* EARNINGS DASHBOARD (DRIVER ONLY) */}
+                        {user?.role === 'driver' && driverStats && (
+                            <div style={{ background: '#1e293b', padding: '24px', borderRadius: '24px', color: 'white', marginBottom: '20px', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                                    <div style={{ background: '#3b82f6', width: '36px', height: '36px', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                        <CreditCard size={18} />
+                                    </div>
+                                    <h3 style={{ fontSize: '18px', fontWeight: 800 }}>Earnings</h3>
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                                    <div>
+                                        <div style={{ fontSize: '12px', opacity: 0.6, marginBottom: '4px' }}>Total Earned</div>
+                                        <div style={{ fontSize: '20px', fontWeight: 800 }}>₹{driverStats.totalEarnings}</div>
+                                    </div>
+                                    <div>
+                                        <div style={{ fontSize: '12px', opacity: 0.6, marginBottom: '4px' }}>Rides Done</div>
+                                        <div style={{ fontSize: '20px', fontWeight: 800 }}>{driverStats.totalRides}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* RIDE HISTORY */}
+                        <div style={{ background: 'white', padding: '24px', borderRadius: '24px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)', marginBottom: '24px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
+                                <div style={{ background: '#f1f5f9', width: '36px', height: '36px', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}>
+                                    <History size={18} />
+                                </div>
+                                <h3 style={{ fontSize: '18px', fontWeight: 800, color: '#1e293b' }}>Ride History</h3>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxHeight: '400px', overflowY: 'auto', paddingRight: '4px' }}>
+                                {rideHistory.length === 0 ? (
+                                    <div style={{ textAlign: 'center', padding: '20px', color: '#94a3b8', fontSize: '14px' }}>No rides yet</div>
+                                ) : (
+                                    rideHistory.map((ride) => (
+                                        <div key={ride._id} style={{ padding: '16px', background: '#f8fafc', borderRadius: '16px', border: '1px solid #f1f5f9' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+                                                <span style={{ 
+                                                    fontSize: '11px', 
+                                                    fontWeight: 800, 
+                                                    textTransform: 'uppercase', 
+                                                    padding: '4px 8px', 
+                                                    borderRadius: '6px',
+                                                    background: ride.status === 'completed' ? '#ecfdf5' : ride.status === 'rejected' ? '#fef2f2' : '#f8fafc',
+                                                    color: ride.status === 'completed' ? '#10b981' : ride.status === 'rejected' ? '#ef4444' : '#64748b'
+                                                }}>
+                                                    {ride.status}
+                                                </span>
+                                                <span style={{ fontSize: '14px', fontWeight: 800, color: '#1e293b' }}>₹{ride.fare}</span>
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: '#64748b', marginBottom: '6px' }}>
+                                                <Calendar size={12} />
+                                                {new Date(ride.createdAt).toLocaleDateString()} at {new Date(ride.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                            </div>
+                                            <div style={{ fontSize: '13px', color: '#1e293b' }}>
+                                                <div style={{ display: 'flex', gap: '8px', marginBottom: '4px' }}>
+                                                    <div style={{ color: '#10b981' }}>●</div>
+                                                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ride.pickup ? "Pickup point" : "Unknown"}</div>
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <div style={{ color: '#ef4444' }}>●</div>
+                                                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ride.destination ? "Destination point" : "Unknown"}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 

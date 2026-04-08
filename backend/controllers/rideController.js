@@ -222,6 +222,44 @@ const rideController = {
         } catch (error) {
             res.status(500).json({ message: 'Failed to go offline', error: error.message });
         }
+    },
+
+    getRideHistory: async (req, res) => {
+        try {
+            const userId = req.user.id;
+            const rides = await Ride.find({
+                $or: [
+                    { passengerId: userId },
+                    { driverId: userId }
+                ]
+            }).sort({ createdAt: -1 });
+
+            res.json(rides);
+        } catch (err) {
+            console.error("HISTORY ERROR:", err);
+            res.status(500).json({ msg: "Server error" });
+        }
+    },
+
+    getDriverStats: async (req, res) => {
+        try {
+            const driverId = req.user.id;
+            const rides = await Ride.find({
+                driverId,
+                status: "completed"
+            });
+
+            const totalEarnings = rides.reduce((sum, ride) => sum + (ride.fare || 0), 0);
+            const totalRides = rides.length;
+
+            res.json({
+                totalEarnings,
+                totalRides
+            });
+        } catch (err) {
+            console.error("EARNINGS ERROR:", err);
+            res.status(500).json({ msg: "Server error" });
+        }
     }
 };
 

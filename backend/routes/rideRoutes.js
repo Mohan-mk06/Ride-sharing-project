@@ -8,5 +8,7 @@ router.post('/start', authMiddleware, rideController.startRide);
 router.post('/reject', authMiddleware, rideController.rejectRide);
 router.get('/drivers', authMiddleware, rideController.getNearbyDrivers);
 router.get('/nearby', authMiddleware, rideController.getNearbyDrivers);
+router.get('/history', authMiddleware, rideController.getRideHistory);
+router.get('/driver-stats', authMiddleware, rideController.getDriverStats);
 
 module.exports = router;
